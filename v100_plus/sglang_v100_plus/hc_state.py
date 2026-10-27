@@ -27,13 +27,9 @@ class SM70GatedResidualState(GatedResidualState):
         return hidden_states, residual
 
     def apply_attn_combine(self, hidden_states, residual):
-        if self.gate is None:
-            return self.attn_combine(hidden_states, (residual, self.normed))
         return self.attn_combine(hidden_states, (residual, self.normed, self.gate))
 
     def apply_ffn_combine(self, hidden_states, residual):
-        if self.gate is None:
-            return self.ffn_combine(hidden_states, (residual, self.normed))
         return self.ffn_combine(hidden_states, (residual, self.normed, self.gate))
 
     def clear_coefficients(self):

@@ -508,7 +508,7 @@ def mix(original, self, hyper_input, *, normalized_input=None):
             self.hc_count,
             self.hidden_size,
         ).to(self.params_dtype)
-        return gather_input(result), (hyper_input, normed)
+        return gather_input(result), (hyper_input, normed, None)
     if (
         hyper_input.ndim != 2
         or hyper_input.shape[0] not in (1, 2, 3, 4)
@@ -552,8 +552,7 @@ def mix(original, self, hyper_input, *, normalized_input=None):
     else:
         down = hc_down(normed, self.input_mix_weight_down.weight)
     result = hc_up(down, normed, self.input_mix_weight_up.weight).to(self.params_dtype)
-    state = (hyper_input, normed) if gate is None else (hyper_input, normed, gate)
-    return result, state
+    return result, (hyper_input, normed, gate)
 
 
 def combine(original, self, block_output, residuals):
@@ -561,12 +560,12 @@ def combine(original, self, block_output, residuals):
         from .prefill import local_input
 
         block_output = local_input(block_output)
-    if len(residuals) == 3:
+    if len(residuals) == 3 and residuals[2] is not None:
         from .kernels.sm70_hc_mix import hc_apply_gate
 
         return hc_apply_gate(block_output, residuals[0], residuals[2])
     if (
-        len(residuals) == 2
+        len(residuals) in (2, 3)
         and block_output.is_cuda
         and block_output.dtype == torch.float16
         and block_output.ndim == 2
@@ -577,7 +576,7 @@ def combine(original, self, block_output, residuals):
             and x.dtype == block_output.dtype
             and x.device == block_output.device
             and x.is_contiguous()
-            for x in residuals
+            for x in residuals[:2]
         )
         and self.block_inject_weight.weight.shape == (4, 10240)
         and self.block_inject_weight.weight.dtype == block_output.dtype

@@ -347,6 +347,9 @@ class TestV100Prefill(CustomTestCase):
         )
 
     def test_boundary_keeps_each_stages_cached_gate_and_clears_it(self):
+        """An absent gate must still reach mainline's three-value HC consumer."""
+        from sglang.srt.layers.hyperconnection import GatedResidual
+
         residual = torch.arange(4 * 12, dtype=torch.float32).reshape(4, 12)
         gate_a, gate_b = torch.full((4, 3), 2.0), torch.full((4, 3), 3.0)
         seen = []
@@ -356,7 +359,15 @@ class TestV100Prefill(CustomTestCase):
 
         def combine(output, values):
             seen.append(values)
-            return values[0] + output.repeat(1, 3)
+            owner = SimpleNamespace(
+                combine=lambda block, state: state[0] + block.repeat(1, 3)
+            )
+            updated, normed = GatedResidual.combine_and_normalize(
+                owner, output, values, None
+            )
+            self.assertIsNone(normed)
+            torch.testing.assert_close(updated, values[0] + output.repeat(1, 3))
+            return updated
 
         state = SM70GatedResidualState(
             expand=lambda value: value,
@@ -383,7 +394,8 @@ class TestV100Prefill(CustomTestCase):
         hidden, residual = ops.attn_readout.read(residual, None)
         ops.attn_update.update(hidden, residual)
         self.assertIsNone(state.gate)
-        self.assertEqual(len(seen[-1]), 2)
+        self.assertEqual(len(seen[-1]), 3)
+        self.assertIsNone(seen[-1][2])
 
     def test_boundary_slices_gate_rows_with_normalized_residuals(self):
         residual = torch.arange(4 * 12, dtype=torch.float32).reshape(4, 12)
