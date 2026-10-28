@@ -11,7 +11,11 @@ The bounded FFN-only pilot is implemented in [ffn_repeat.py](ffn_repeat.py), wit
 [ownership controls](check_controls.py). Its first actual-model pilot is complete:
 no demonstrated capability gain, with the long-prompt causal control unresolved.
 See [results and disposition](#2026-10-28--ffn-only-pilot-results). All owned
-workers are stopped and public hosting remains down. The
+workers are stopped and public hosting remains down. The follow-up
+[slowdown diagnosis](#2026-10-28--eager-pilot-slowdown-diagnosis) reproduces an
+11.25x decode penalty from bypassing CUDA graphs with MTP off in both arms.
+Graph-compatible intervention execution must precede further generation pilots;
+the eager cost result is not an estimate of normal serving overhead. The
 earlier integration handoff below is historical; do not reapply its patches.
 
 ## 2026-10-28 — Charter and starting point
@@ -478,7 +482,7 @@ movement, not semantic refinement, and are only two sampled positions.
 only. No demonstrated capability benefit, no production/default change, no reason
 to expand a strength/layer sweep from this pilot. Main/dev stay at `cdf91e2bf`.
 
-**Next bounded step:** compare fixed inputs with an independently owned pre-call
+**Original next step (execution prerequisite added below):** compare fixed inputs with an independently owned pre-call
 residual snapshot, post-call mutation checks and selected-key/logit observations.
 Separate ordinary numerical variation from intervention effects before repeating
 full blocks or claiming semantic improvement. Use short diagnostic outputs first;
@@ -489,6 +493,67 @@ Raw evidence and full report:
 `~/sglang-workspace/frozen-model-20261028/ffn-pilot/REPORT.md` and `analysis.json`.
 The supervisor resumed, every owned worker stopped, and no GPU compute processes
 remained after completion. Public hosting stayed down throughout.
+
+## 2026-10-28 — Eager pilot slowdown diagnosis
+
+The owner questioned the approximately4TPS result. This was a research setup
+problem: MTP was deliberately off, and the entire target model ran eagerly to
+allow a Python forward hook. The maintained MTP3 path had already passed the
+upstream smoke at mean2832.13prefill/92.25decodeTPS. That is a separately recorded
+three-category/256-output result, not a new matched MTP comparison here.
+
+One private model load at `94785d13f` isolates the graph bypass, sampling callback
+and disabled intervention. Same FP4-Local weights, TP8/DCP4/EP1, FP16 KV/state,
+strict dispatch, vision,16K context/4608physical, paired4096/2048, T0/P1/seed531.
+All four controls have identical7903-token prompts,64 outputs, separate cache
+salts, no cache hits or retractions. MTP is off throughout. An external diagnostic
+wrapper chooses the existing graph replay or eager path per request; all eight
+ranks log the actual choice. No repeated FFN runs in these controls.
+
+| Tokens/s | Before: eager, callback | After: graph, same callback |
+| --- | ---: | ---: |
+| Prefill | 2938.24 | 2944.00 |
+| Decode | 3.87 | 43.49 |
+
+Graph decode is11.25x faster; prefill differs by0.2%, effectively flat. Omitting
+the callback gives2949.26prefill/43.54decodeTPS. Running the original hook's off
+checks in eager mode gives2952.12/3.87. Neither callback nor off-hook cost explains
+the large slowdown. This is a bounded64-output screen, not a new performance
+baseline. Some token sequences differ after positions41/52, so no exact-output
+equivalence claim. Those differences do not plausibly explain the11x gap.
+
+A separate one-step rank0 cProfile observes140392 function calls,1060 Triton
+launches,1048 `torch.empty` and413 `torch.empty_like` calls, and91 PyTorch
+distributed all-reduces. Instrumented forward time is368ms versus about259ms per
+token in the unprofiled eager control; use these counts as host-work attribution,
+not an additive native-time budget. Eager collective dispatch also differs from
+graph-captured PyNCCL. No isolated communication-speed claim is established.
+
+The attempted native graph/eager trace pair was invalid: the launcher left
+`SGLANG_PROFILE_V2` unset (default false), and the legacy profiler ignores
+`profile_stages`. Its two capture slots were consumed by the first request's
+prefill/decode, with incomplete cross-rank coverage and large profiling overhead.
+There is no matched eager native trace. Preserve both captures as failed
+diagnostic evidence; do not use them for GPU utilization or wall-time budgets.
+The apparent stall completed; sampled stacks showed idle request handling, not
+a model collective deadlock. No extra model reload was justified. A V2 launcher
+correction is saved outside Git and syntax checked, not rerun on GPUs.
+
+**Disposition and revised next step:** no MTP or production-code regression found.
+The prior4.4% extra-FFN decode penalty describes a host-dominated eager setup and
+must not be extrapolated to graph/MTP serving. Integrate the intervention into
+graph capture before longer generations; simply enabling graphs with the current
+hook would silently omit it, because upstream registers observation hooks after
+capture. Preserve an off control and prove the intervention executes during
+replay. Start with short outputs and a wall-time budget; abort a severe baseline
+slowdown before running the behavior suite. Then resume the independently owned
+residual snapshot/fixed-input controls above. Do not repeat the512-output eager
+suite or claim that these measurements quantify normal intervention overhead.
+
+Raw requests, timings, cProfile, unsuccessful native captures and full report:
+`~/sglang-workspace/frozen-model-20261028/eager-diagnostic/`. Controller completed,
+both owned units stopped, no GPU compute processes remained. Public hosting and
+main/dev were unchanged. No further capability sweep or throughput grid.
 
 ## Journal entry template
 
