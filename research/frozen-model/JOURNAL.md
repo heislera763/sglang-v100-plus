@@ -5,6 +5,12 @@ implementation decisions, controls, negative results and the next bounded step.
 The owner's [original brief](BRIEF.txt) is the research charter. It is a set of
 questions, not evidence that any proposed intervention already works.
 
+**Resume here:** the brief and journal are committed on `experimental`, based on
+validated `3a7f04fb`. The separate `dev` worktree has an unfinished upstream merge;
+its first model smoke failed at the Marlin adapter. See the
+[latest handoff](#2026-10-28--checkpoint-after-the-first-upstream-smoke) before
+continuing. No frozen-model intervention has been implemented or benchmarked yet.
+
 ## 2026-10-28 — Charter and starting point
 
 Question: can the existing frozen GLM checkpoint support useful alternative
@@ -192,9 +198,9 @@ thread. That changes ordering, not the requirement to validate the integration.
 - Maintenance evidence/tooling: `~/sglang-workspace/frozen-model-20261028/`.
   `upstream-commits.txt` pins the incoming list; `resolve_merge.py` records the
   initial conflict resolution; `cpu/` holds per-file test output.
-- Import smoke for plugin, GLM model and DSA backend passes on CPU. Per-file
-  regression tests were started; do not describe the overall suite as passing
-  until its final results are inspected. No model/GPU test has run this pass.
+- At journal creation, import smoke for plugin, GLM model and DSA backend passed
+  on CPU; per-file regression tests had started and no model/GPU test had run.
+  The later checkpoint below supersedes that test status.
 
 **Owner's explicit integration policy:** do not preserve inferior fork behavior
 merely because it existed. Evaluate upstream changes; adopt better upstream
@@ -223,6 +229,118 @@ one private GLM smoke with current TP8/DCP4/MTP3/FP16 state and image/prefix che
 record prefill/decode honestly; commit and align/push main/dev. Then merge that
 validated result into `experimental` and implement the bounded first experiment.
 Keep public hosting down and stop owned workers after tests.
+
+## 2026-10-28 — Checkpoint after the first upstream smoke
+
+The owner asked to preserve the branch/journal before getting further into
+maintenance. The initial brief/journal commit `a53d08b3c` was pushed to
+`origin/experimental`. Research worktree:
+`/home/alexander/sglang-workspace/frozen-model-experimental`.
+Main/dev/origin remain at validated `3a7f04fbbcbe11c588a4ab16751fa673da131ef9`;
+the open merge targets upstream `59af99a873f39c3b281df0f9c609b3a0d3270726`.
+Do not describe main/dev as updated or the merge as validated.
+
+### What the integration has established
+
+- Paired prefill now uses upstream `iteration_ids` / `iteration_cols` instead of
+  the removed KV location-plan API. Its regression uses real `ForwardBatch`,
+  `RunnerIds` and `IterationIds` ownership. The public `mamba_pool` property still
+  delegates to the new state owner; it does not presently need a compatibility
+  shim in the PP commit graph.
+- Upstream added `a_output_slices` to the FP16 MoE interface. The SM70 adapter
+  accepts the ordinary single slice and explicitly rejects unsupported multiple
+  slices under strict dispatch. No silent generic fallback was introduced.
+- Adapted per-file CPU regressions passed for strict dispatch, paired prefill,
+  Triton verify metadata, decode graph runner, draft proposal/seeding, chat
+  rendering and NVFP4 padding. Logs are in the maintenance `cpu/` directory.
+  These passes predate the newest Marlin edits; they do not validate those edits.
+- Installed upstream's required `tml-renderers==0.1.0` into the existing venv
+  using `uv`; the chat regression then passed (175 cases, 255 subtests).
+- One private TP8/DCP4/MTP3 model process loaded the weights (~195–209 seconds,
+  22.69 GiB/rank) but failed in warmup: the SM70 Marlin adapter did not accept
+  upstream's new `expert_ids_are_sorted` keyword. The controller stopped it.
+  **No new prefill or decode TPS was measured.** Image, reuse and sampled smoke
+  checks were not reached. Both owned units are inactive and GPU workers are gone.
+
+### Why this needs a real adapter change
+
+Upstream now supplies sorted-routing certification, optional two-word counts
+`[padded_tokens, inactive_blocks]`, and `zero_inactive_output`. Its down projection
+relies on the GEMM clearing valid routes assigned to inactive experts, while
+preserving routes omitted from the descriptor. It removed a full output clear.
+Dropping the new arguments would therefore be incorrect.
+
+The native SM70 Marlin implementation skips negative experts without clearing
+their output. The fork's small routed MMA implementation previously always
+cleared them and accepted only a one-word count. Both must honor the new contract.
+This is integration work, not a frozen-model intervention.
+
+Unvalidated edits currently in the **dev** worktree:
+
+- `kernels/moe_marlin.py`: accepts the new arguments, allocates zeroed output when
+  needed, passes the first count word to legacy native kernels, forwards the
+  inactive-output policy and avoids the old routed GEMV path for the new producer.
+  Revisit that dispatch exclusion before accepting a performance regression.
+- `sm70_nvfp4_routed.py`: conditional inactive-route writes, including split-K
+  reduction, and two-word count acceptance. Known unfinished call site:
+  `padded_count.reshape(1)` must instead select its first word before reshaping.
+- New lazy `moe.zero_inactive_routes` Triton prototype: clears only inactive valid
+  routes before native GEMMs that skip them. Check descriptor allocation capacity
+  and masks: its exact `sorted_ids.numel() == expert_ids.numel() * block_size`
+  validation may be too strict for the upstream producer. Do not assume it is safe
+  until tested. Empty routes, unused tails and omitted output rows need coverage.
+- The strict-dispatch routed-kernel test stub must accept the newly passed keyword
+  argument. The latest prototype is not formatted or tested yet.
+
+Exact local recovery copy, including staged and unstaged binary patches, the new
+untracked source, merge hashes and checksums:
+`~/sglang-workspace/frozen-model-20261028/resume-checkpoint-20261028T203928Z/`.
+The original worktree still contains all of it; **do not blindly reapply patches**.
+Raw tooling/captures and this recovery copy stay outside Git.
+
+Next maintenance step: finish and test that routing contract (including graph
+refresh/canaries), then rerun the single private model smoke. Preserve its first
+failure log. Update provenance/core-patch inventory, drop the superseded Marlin
+bias entry, commit the validated merge and align/push main/dev. Merge that result
+into `experimental` before implementing the research pilot. Do not restore hosting.
+
+### First-experiment implementation notes to preserve
+
+The smallest state-safe exploratory control is one additional middle-layer
+FFN/MoE + mHC update with damping. It intentionally excludes repeated attention;
+it can help separate expert transformation effects before a four-layer loop.
+It does **not** establish the behavior of a full repeated-depth transformer.
+
+- Existing `model_executor/hook_manager.py` accepts `--forward-hooks` factories.
+  Hooks are registered after CUDA-graph capture, so an eager pilot must explicitly
+  disable decode graphs and MTP. Otherwise the intervention could appear enabled
+  while replay silently omits it. Verify actual module names and hook execution.
+- A middle decoder layer (candidate: layer 23) returns `(hidden_states,
+  topk_indices)`. Work at a completed FFN boundary with all four residual streams
+  materialized; assert width 16384 and no pending residual contribution. Avoid the
+  final layer, whose contracted output has different semantics.
+- Own a copy before an extra FFN call: the ordinary expert path can reuse residual
+  storage. Reuse the layer's `hc_ffn_pre`, normalization, MLP and `hc_post` rather
+  than inventing a new FFN equation. Its MLP has deferred TP reduction; establish
+  the exact shared/routed scaling and reduction contract before explicitly summing
+  partials. Two reductions or none would invalidate the experiment.
+- Blend the completed result with the original state in FP32, cast once to FP16,
+  and update `residual_batch.set_written(...)` as well as the returned tensor.
+  Preserving only the Python return while leaving lazy residual ownership stale
+  is not a valid intervention.
+- Candidate controls: ordinary execution; extra computation with zero-strength
+  output mixing; one damped application (e.g. 0.25); optionally undamped repetition
+  as a contrasting control. Zero strength must preserve cached continuation too.
+  Pick a bounded pilot, not a broad layer/strength sweep.
+- Existing request `custom_params` could select arms within one eager process,
+  saving repeated multi-minute loads. Current sampling code only retains them
+  when a custom logit processor is supplied; an explicitly enabled no-op processor
+  is one possible carrier. This is an untested implementation option, not a new
+  public launch requirement. Baseline must use the same hook/processor overhead.
+- Isolate prefix-cache entries by arm (`cache_salt`) and verify request reuse.
+  Keep observations outside timed requests. Use short, checkable prompts and
+  report both prefill/decode cost plus behavioral changes; no 524K qualification
+  or claim of general capability improvement from a handful of cases.
 
 ## Journal entry template
 
