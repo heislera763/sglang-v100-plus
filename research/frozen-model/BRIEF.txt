@@ -1,0 +1,114 @@
+FROZEN-MODEL INFERENCE AS A RESEARCH SPACE
+A conceptual brief for the agent working on my SGLang fork
+Alex | 28 October 2026
+
+PURPOSE AND CONTEXT
+
+I have been iterating on an SGLang fork for GLM 5.3 Flash on my 8x V100 system, with performance work supported by Sol 6.1. That has prompted a broader curiosity: how much of a pretrained model's capability depends on its learned weights, and how much depends on the particular computation we choose to execute with those weights?
+
+I am interested in modifying inference-time computation, especially looped transformers, without additional model training. I also want to observe what changes internally rather than treating the model as a black-box benchmark contestant. J-space is particularly interesting as a possible window into intermediate semantics, and perhaps eventually as part of an alternative computation itself.
+
+This is a research brief, not an implementation specification. Please treat the ideas as leads and questions, with freedom to assess their relevance to the actual fork. Nothing here assumes that an implementation already exists or that any intervention will improve this checkpoint. A useful outcome could be better reasoning, better efficiency, a clearer account of why a promising idea fails, or evidence that the original execution is already difficult to improve.
+
+THE CENTRAL IDEA: REUSING COMPUTATION, NOT ADDING KNOWLEDGE
+
+An ordinary transformer executes a sequence of different learned transformations. A looped variant reuses some transformation on an evolving internal state before continuing. In a pretrained model, this could mean revisiting part of its existing computation rather than introducing newly trained layers. The appeal is extra opportunity to refine or combine information using weights already resident in memory.
+
+That is conceptually different from generating a longer textual chain of thought, feeding a completed answer back into a new prompt, or carrying state from one token to the next. All may provide additional computation, but they create different information flows and costs. “Looping” should not obscure these distinctions.
+
+The optimistic hypothesis is that a useful partial result can become input to further processing that the original forward pass would not allow. The skeptical hypothesis is equally important: a block was trained for a particular distribution of inputs and position in the network. A second application can amplify a mistake, distort representation geometry, or interfere with downstream expectations. Compatible tensor dimensions do not establish compatible meaning. More computation need not produce more correct reasoning.
+
+Recent training-free work suggests that moderated reuse, including interpolation with earlier states, can sometimes work better than naive repetition. That is evidence that the space is worth exploring, not a general recipe. Mathematical analogies to iterative solvers or numerical integration are useful ways to think, but they do not prove that a pretrained network is solving the corresponding optimization problem.
+
+WHAT “NO TRAINING” MEANS HERE
+
+My preference is to keep model weights unchanged and avoid needing a post-training project before learning anything useful. However, several distinct categories are easily conflated: genuinely training-free inference changes; calibration or configuration search with frozen weights; separately fitted interpretability tools; and learned adapters or controllers around a frozen backbone.
+
+These can all be interesting, but their costs and claims are different. A result obtained with a specially trained reasoning checkpoint, learned gate, or answer-informed search is not automatically evidence that an arbitrary pretrained model can be upgraded by changing its execution alone. Conversely, fitting an observational lens need not mean changing the model being observed.
+
+WHY THIS PARTICULAR MODEL MAKES THE QUESTION INTERESTING
+
+Public GLM 5.3 Flash descriptions include hybrid linear and sparse attention, routed experts, and multi-stream hyper-connections. These are background clues, not a substitute for what the local fork actually implements. The current checkpoint, numerical representation, kernels, state handling, and execution constraints remain local facts.
+
+Such an architecture makes recurrence more than a question of calling a layer again. Internal attention state and cached history have meanings tied to token progression. Sharing weights does not necessarily imply sharing state across repeated depth passes. Expert choices may change as representations change, while multiple residual streams complicate assumptions drawn from a conventional single-stream transformer.
+
+On 8x V100, the interesting resource is not just parameter memory. Additional communication, state, prefill work, decoding latency, and observability overhead can determine whether an apparently elegant approach is useful. I am interested in the resulting capability-versus-cost tradeoff, without assuming that every additional operation must immediately justify itself as a production optimization.
+
+Model background:
+https://huggingface.co/zai-org/GLM-5.3-Flash
+https://docs.nvidia.com/nemo/automodel/latest/model-coverage/vision-language-models/thudm/GLM-5.3-Flash
+
+J-SPACE: A POSSIBLE SEMANTIC WINDOW
+
+The Jacobian-lens work offers a way to relate intermediate activations to downstream output influence. Its J-space representation uses sparse, nonnegative combinations of vocabulary-labelled directions, potentially making some intermediate content more legible than raw hidden-state coordinates.
+
+This should not be understood as a literal transcript of the model's mind, a dedicated physical module, or a complete description of its computation. A readable concept is neither proof of a conscious thought nor proof that the concept is correct. The representation is an interpretive construction whose usefulness depends on its relationship to actual behavior.
+
+The exciting part is the possibility of moving beyond “the hidden state changed.” There are three separate questions: did an intervention change the state; did the model's behavior improve; and did the particular semantic change we identified cause that improvement? The original work includes causal interventions, making the third question more than a visualization exercise.
+
+Fitting these maps involves calibration and backward computations even though the observed model can remain frozen. Applying an already fitted lens is a different workload. Compatibility with optimized inference kernels, multi-stream states, and artificially looped activations cannot simply be assumed. A lens that reads normal execution plausibly may become less reliable when inference is changed.
+
+Primary work and implementation:
+https://transformer-circuits.pub/2026/workspace/index.html
+https://github.com/anthropics/jacobian-lens
+
+A community replication investigates related GLM and DeepSeek architectures, including multi-stream mapping. It reports useful readouts and interventions but a more cautious picture of a selectively identifiable reasoning workspace. It is relevant supporting exploration, not confirmation on this exact checkpoint or hardware:
+https://xiangchensong.github.io/blog/2026/jacobian-lens-global-workspace/
+https://github.com/xiangchensong/jacobian-lens-open-frontier
+
+A DIRECT BRIDGE: SEMANTIC FEEDBACK
+
+J-CoT explicitly connects J-space to recurrent inference. Rather than merely displaying intermediate concepts, it extracts a sparse semantic representation and reconstructs it through an earlier representation dictionary for another computation cycle. This suggests a possible interface between different layer geometries, instead of assuming raw hidden states can be copied backward meaningfully.
+
+Its training-free variant deserves attention, but the reported experiments start from a reasoning-adapted checkpoint; other variants learn interface components. That is not yet evidence of a drop-in GLM improvement, and the available paper leaves reproducibility questions. The connection is nevertheless unusually close to the motivating idea: use interpretable intermediate content as something computation can revisit.
+
+https://arxiv.org/html/2607.21981v1
+
+OBSERVING REFINEMENT RATHER THAN JUST MOVEMENT
+
+I would like to understand whether additional computation genuinely resolves uncertainty, integrates evidence, repairs an intermediate error, or simply makes an existing answer more dominant. Semantic trajectories, output distributions, expert-routing changes, and internal state dynamics could provide complementary views. None alone establishes progress.
+
+Interesting questions include whether a useful intermediate concept appears earlier or becomes more influential, whether the eventual answer changes for the right reason, and whether improvements on one kind of problem come with regressions elsewhere. Wrong-to-right changes and right-to-wrong changes are both informative. Stability can mean successful convergence or getting stuck; confidence can mean clarity or amplification of a mistake.
+
+Causal observation is especially appealing: can a candidate internal change be connected to the outcome rather than merely correlated with it? Ordinary generation behavior and externally checkable answers remain important anchors. A sophisticated-looking visualization should not become the success criterion.
+
+Other lenses, feature decompositions, attribution methods, and activation interventions may be useful complements. Some require separately trained probes or auxiliary models, and different readouts answer different questions. An observer also need not become a controller: using internal signals to decide how much computation to allocate introduces another hypothesis to validate.
+
+“Beyond the Trace” explores semantic and routing-based signals, but does not establish a universal early detector of eventual correctness. Its learned components also matter when interpreting training-free claims:
+https://arxiv.org/html/2608.17638v2
+
+RESEARCH DIRECTIONS WORTH CONNECTING
+
+Frozen layer reuse. “Inner Loop Inference for Pretrained Transformers” is directly relevant evidence that repeated internal computation can sometimes help existing models without weight updates, while naive repetition can degrade them. Its results are modest and model-dependent. “Training-Free Looped Transformers” extends the discussion toward additional architectures, but deserves caution about configuration reporting and implementation reproducibility. Both are leads, not authority over the fork.
+https://arxiv.org/html/2602.14759v1
+https://github.com/jonathanlys01/looped-transformer
+https://arxiv.org/html/2605.23872v1
+
+Soft intermediate representations. Soft Thinking and SwiReasoning modify the feedback between decoding steps using probability-weighted embedding mixtures, with the latter alternating soft and explicit reasoning. They offer another way to avoid immediately committing every intermediate step to a single token while keeping weights frozen. This is not equivalent to independently exploring every possible reasoning branch. Evidence that mixtures can collapse toward their dominant component makes that limitation an interesting research question.
+https://arxiv.org/html/2505.15778v1
+https://github.com/UCSB-AI/Soft-Thinking
+https://arxiv.org/html/2510.05069v3
+https://arxiv.org/abs/2508.03440
+
+Cross-token recurrence. Recirculation feeds deeper information into shallower processing across tokens, potentially improving continuity or state tracking rather than simply adding same-token depth. Its fixed and learned variants should be distinguished. Runtime claims depend on execution assumptions, and additional recurrence may interact differently with a model that already contains recurrent attention state.
+https://arxiv.org/html/2608.17981v1
+
+Persistent internal reminders. Memory Inception explores text-derived attention memories without updating backbone weights. This raises a different explanation for apparent reasoning failure: perhaps useful information is not retained or made available at the right computation stage. Compatibility with hybrid attention is an open question, and calibration is not the same thing as universal plug-and-play behavior.
+https://arxiv.org/html/2605.06225v2
+
+Diversity through execution. Architectural Sampling varies layer-repeat patterns to produce different candidate answers. This could reveal multiple useful computations supported by one checkpoint. Better coverage across several candidates is not the same as a better single answer, especially without a reliable verifier, and equal candidate counts need not mean equal computational budgets.
+https://arxiv.org/html/2610.01687v1
+
+SPECULATIVE CONNECTIONS
+
+One possibility is that semantic feedback could carry a compact useful result backward while avoiding some raw-state mismatch. The opposite possibility is that the compression removes precisely the nonverbal information needed for further reasoning. Both would teach us something about what an interpretable representation preserves.
+
+Another possibility is that late-discovered information could become useful to earlier computations if it were made available there. This connects looping to feedback systems and iterative inference, but does not establish that pretrained blocks naturally implement a stable refinement process.
+
+MoE routing may provide another view of changing computation: semantic shifts and expert usage might track one another. That does not mean individual experts correspond cleanly to named skills, nor that a routing signal is an adequate substitute for a semantic lens. The relationship itself is worth understanding.
+
+Finally, some tasks may need greater computational depth, others better state continuity, and others better candidate selection. These mechanisms could look similar in aggregate scores while solving different problems. Distinguishing them is part of the appeal.
+
+THE OPEN QUESTION
+
+The broad question is whether the pretrained checkpoint supports useful inference computations beyond the one it normally executes, and whether we can understand those computations well enough to tell improvement from distortion. I am interested in evidence, surprising connections, and clear explanations as much as a practical speed or accuracy gain. The actual fork should determine what is feasible; this brief is intended to open that investigation, not predetermine its answer.
