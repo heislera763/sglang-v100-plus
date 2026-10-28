@@ -185,7 +185,25 @@ Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#a
 
 ## Performance and validation
 
-Latest GLM screen (2026-10-22), FP4-Local/own MTP3/TP8/DCP4/524K/FP16 KV/state/vision.
+Latest GLM screen (2026-10-27): FP4-Local/own MTP3/TP8/DCP4/524K,
+FP16 KV/state and vision, with both NVLink quads fully connected and all PCIe
+links at Gen3x8. Same three near8K prompts, 32-token warmup, 256 T0/seed531
+outputs; the compatible recorded control is reused.
+
+| Tokens/s, category mean | Before | After |
+| --- | ---: | ---: |
+| Prefill | 2,838 | 2,837 |
+| Generation | 84.4 | 88.0 |
+
+Narrow routed expert gate/up now splits K eight ways with FP32 partial sums,
+improving generation **4.3%**. Verification cycles shorten **6.6%** despite
+acceptance falling69.9%→67.1%; prefill is unchanged. Reconstruction and output
+remain FP16, with router/global scaling after the FP32 sum. Reduction order
+changes, so this is not bit-exact parity. Fixed FP64-reference bounds,
+changing-route CUDA graphs, canaries and sanitizers pass; images, prefix reuse
+and lab-sampled execution pass. No new full-context throughput claim.
+
+Earlier long-context selector screen (2026-10-22), with the same model/cache profile:
 Before uses replicated selection on the qualified upstream merge; after shares
 whole-chunk selection within each quad. Short-case baselines reuse the compatible
 recorded process; deep append pairs use one resident process and exact pinned prefix.

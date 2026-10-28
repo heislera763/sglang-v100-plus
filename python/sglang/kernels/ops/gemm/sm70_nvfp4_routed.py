@@ -8,6 +8,8 @@ K-major shared weights avoid scattering each decoded word across distant rows.
 import tilelang
 import tilelang.language as T
 import torch
+import triton
+import triton.language as tl
 
 
 @tilelang.jit(
@@ -17,7 +19,7 @@ import torch
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
-def _routed_mma(n, k, topk, mul_router):
+def _routed_mma(n, k, topk, mul_router, splits=1):
     bm, bn, bk, block = 16, 128, 64, 8
     nt, nr = T.dynamic("nt"), T.dynamic("nr")
     ns, ne, nb = T.dynamic("ns"), T.dynamic("ne"), T.dynamic("nb")
@@ -33,9 +35,9 @@ def _routed_mma(n, k, topk, mul_router):
         Experts: T.Tensor([nb], T.int32),
         Count: T.Tensor([1], T.int32),
         Router: T.Tensor([nr], T.float32),
-        C: T.Tensor([nr, n], T.float16),
+        C: T.Tensor([splits, nr, n], T.float32 if splits > 1 else T.float16),
     ):
-        with T.Kernel(nb, n // bn, threads=128) as (row, col):
+        with T.Kernel(nb, n // bn, splits, threads=128) as (row, col, part):
             ash = T.alloc_shared([bm, bk], T.float16)
             bsh = T.alloc_shared([bk, bn], T.float16)
             accum = T.alloc_fragment([bm, bn], T.float32)
@@ -45,7 +47,8 @@ def _routed_mma(n, k, topk, mul_router):
             if row * block < Count[0]:
                 T.clear(accum)
                 if expert >= 0:
-                    for kk in T.Pipelined(k // bk, num_stages=2):
+                    for step in T.Pipelined(k // bk // splits, num_stages=2):
+                        kk = part * (k // bk // splits) + step
                         for m, d in T.Parallel(bm, bk):
                             route = T.if_then_else(m < block, Ids[row * block + m], nr)
                             ash[m, d] = T.if_then_else(
@@ -90,20 +93,57 @@ def _routed_mma(n, k, topk, mul_router):
                     if m < block:
                         route = Ids[row * block + m]
                         if (route >= 0) & (route < nr):
-                            if expert >= 0:
+                            if splits > 1:
+                                C[part, route, col * bn + j] = accum[m, j]
+                            elif expert >= 0:
                                 if mul_router:
-                                    C[route, col * bn + j] = T.cast(
+                                    C[0, route, col * bn + j] = T.cast(
                                         (accum[m, j] * Router[route]) * G[expert],
                                         T.float16,
                                     )
                                 else:
-                                    C[route, col * bn + j] = T.cast(
+                                    C[0, route, col * bn + j] = T.cast(
                                         accum[m, j] * G[expert], T.float16
                                     )
                             else:
-                                C[route, col * bn + j] = 0
+                                C[0, route, col * bn + j] = 0
 
     return nvfp4_routed_sm70
+
+
+@triton.jit
+def _finish_routed(
+    PARTIALS,
+    GLOBAL,
+    ROUTER,
+    IDS,
+    EXPERTS,
+    COUNT,
+    OUTPUT,
+    ROUTES: tl.constexpr,
+    N: tl.constexpr,
+    SPLITS: tl.constexpr,
+    MUL_ROUTER: tl.constexpr,
+):
+    block, tile = tl.program_id(0), tl.program_id(1)
+    if block * 8 < tl.load(COUNT):
+        expert = tl.load(EXPERTS + block)
+        route = tl.load(IDS + block * 8 + tl.arange(0, 8))
+        col = tile * 128 + tl.arange(0, 128)
+        valid = (route[:, None] >= 0) & (route[:, None] < ROUTES)
+        value = tl.full((8, 128), 0, tl.float32)
+        for split in tl.static_range(SPLITS):
+            value += tl.load(
+                PARTIALS + (split * ROUTES + route[:, None]) * N + col[None, :],
+                valid,
+                0,
+            )
+        if MUL_ROUTER:
+            value *= tl.load(ROUTER + route, (route >= 0) & (route < ROUTES), 0)[
+                :, None
+            ]
+        value *= tl.load(GLOBAL + expert, expert >= 0, 0)
+        tl.store(OUTPUT + route[:, None] * N + col[None, :], value, valid)
 
 
 def sm70_nvfp4_routed_gemm(
@@ -125,7 +165,10 @@ def sm70_nvfp4_routed_gemm(
     padding is >=a.rows*topk, expert -1 produces zero, and padded_count gates
     unused tail metadata. Valid experts lie within the bank; count is bounded
     by sorted_ids. The caller guarantees these device-side values.
-    Scale bytes use the encoded Marlin layout. No CPU reads or global scratch.
+    Scale bytes use the encoded Marlin layout. Long, narrow contractions split
+    K into FP32 partials before scaling and the only FP16 output store. Scratch
+    is bounded by tensor capacity and owned by this invocation, including graph
+    capture; no CPU count reads or process-global buffers are used.
     """
     if a.ndim != 2 or weight.ndim != 3:
         raise ValueError("SM70 NVFP4 routed GEMM requires matrices and expert banks")
@@ -176,7 +219,16 @@ def sm70_nvfp4_routed_gemm(
     )
     if any(t.device != a.device or not t.is_contiguous() for t in tensors):
         raise ValueError("SM70 NVFP4 routed GEMM requires contiguous colocated tensors")
-    _routed_mma(n, k, topk, mul_router)(
+    # Small expert populations leave too few N tiles to fill 80 SMs. Eight
+    # independent K partitions expose more work without decoding weights twice.
+    # Wide, short-K down projections already have enough output parallelism.
+    splits = 8 if k >= 2048 and k % 512 == 0 and n <= 1024 else 1
+    target = (
+        torch.empty((splits, m * topk, n), device=a.device, dtype=torch.float32)
+        if splits > 1
+        else output.view(1, -1, n)
+    )
+    _routed_mma(n, k, topk, mul_router, splits)(
         a,
         weight,
         scales.view(torch.uint64),
@@ -185,6 +237,22 @@ def sm70_nvfp4_routed_gemm(
         expert_ids,
         padded_count.reshape(1),
         router.reshape(-1),
-        output.view(-1, n),
+        target,
     )
+    if splits > 1:
+        _finish_routed[(expert_ids.numel(), n // 128)](
+            target,
+            global_scale,
+            router,
+            sorted_ids,
+            expert_ids,
+            padded_count,
+            output,
+            m * topk,
+            n,
+            splits,
+            mul_router,
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
     return output

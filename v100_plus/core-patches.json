@@ -31,7 +31,7 @@
     "python/sglang/srt/speculative/pp_spec_relay.py": "Keep proposal probabilities aligned with request identities across the PP relay.",
     "python/sglang/test/test_utils.py": "Handle CPU-only and UUID CUDA visibility without breaking numeric CI test-port lanes.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer_decode.py": "Volta MMA decode/verification index scoring: live causal tile bounds and fused FP32 head reduction, without dense per-head score scratch.",
-    "python/sglang/kernels/ops/gemm/sm70_nvfp4_routed.py": "Volta MMA small-row routed NVFP4 GEMM with encoded Marlin scales, K-major decoded weights and unchanged precision boundaries.",
+    "python/sglang/kernels/ops/gemm/sm70_nvfp4_routed.py": "Volta MMA small-row routed NVFP4 GEMM with encoded Marlin scales and K-major decoded weights; narrow long-K projections use eight FP32 partitions and capacity-bounded invocation-owned scratch, applying router/global scaling before the single FP16 output store.",
     "python/sglang/kernels/ops/attention/v100.py": "Lazy canonical V100 sparse H8/H16/H32/H64, dense vision, bounded device-counted DFlash2 GQA window and recurrent CUDA adapters; sparse split work through eight verification queries, caller-owned scratch, FP16 KV/normalized partials and FP32 LSE reduction; resolved per-query window semantics preserved.",
     "python/sglang/srt/arg_groups/fields/exec_.py": "Expose canonical V100 DSA profile and resolvable linear-attention backend fields.",
     "python/sglang/srt/arg_groups/fields/mm.py": "Expose resolvable V100 vision attention for the unified GLM profile.",

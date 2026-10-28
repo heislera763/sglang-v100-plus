@@ -128,8 +128,11 @@ def test_checkpoint_reference_and_graph_replay(m, topk, n, k):
     "m,topk,n,k,mul_router",
     [
         (1, 8, 128, 64, False),
+        (1, 8, 512, 4096, False),
         (3, 8, 512, 4096, False),
+        (4, 8, 512, 4096, False),
         (3, 8, 1024, 4096, False),
+        (32, 1, 512, 4096, True),
         (24, 1, 4096, 256, True),
         (32, 1, 4096, 512, True),
     ],
@@ -239,6 +242,15 @@ def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):
         torch.testing.assert_close(out.cpu(), expected.half(), rtol=0.001, atol=0.0002)
         assert torch.isfinite(out).all()
         assert torch.equal(storage[-64:], torch.full_like(storage[-64:], 17.0))
+
+    # Replaying an empty schedule must not read stale partials or invalid tail
+    # experts, and must leave both the output and its canary untouched.
+    count.zero_()
+    expert_ids.fill_(123456)
+    storage.fill_(17.0)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(storage, torch.full_like(storage, 17.0))
 
 
 if __name__ == "__main__":
