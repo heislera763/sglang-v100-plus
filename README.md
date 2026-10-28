@@ -13,16 +13,18 @@ metadata and cache/state lifetimes. Advance `main` after correctness and model
 throughput checks. Qwen retains its existing backend during this work.
 Clone remotes: `origin` is this fork; `upstream` is `sgl-project/sglang`.
 
-Integrated upstream: [0d6b283d](https://github.com/sgl-project/sglang/commit/0d6b283d7e6ac79edc10b2ca788f309e972f527b), integrated 2026-10-22.
-This integration includes252upstream commits, including hybrid extend planning
-without host/device synchronization, persistent tracked-state copies and checkpoint
-correctness fixes. Target/draft configuration and cache ownership remain scoped.
+Integrated upstream: [59af99a8](https://github.com/sgl-project/sglang/commit/59af99a873f39c3b281df0f9c609b3a0d3270726), integrated 2026-10-28.
+This update brings 479 upstream commits, including cache/state ownership changes,
+hybrid MTP fixes, seeded draft proposals and segmented prompt rendering. SM70
+adapters honor the new routing/zeroing contract; upstream's corrected Marlin bias
+handling replaces our old patch. Paired prefill uses the new iteration-ID owner.
 Hardware adapters live in [v100_plus/sglang_v100_plus](v100_plus/sglang_v100_plus),
 reusable operators in [python/sglang/kernels/ops](python/sglang/kernels/ops), and
 build/Marlin changes in [v100_plus/aot](v100_plus/aot) and [v100_plus/patches](v100_plus/patches).
 [Provenance](v100_plus/provenance.json) and [recorded core changes](v100_plus/core-patches.json)
 make upstream updates auditable. Services, benchmark clients, traces and project notes
-stay outside Git. This assumes familiarity with SGLang.
+stay outside Git; the separate `experimental` branch keeps its frozen-model
+research journal and implementation. This assumes familiarity with SGLang.
 
 ## Checkpoints
 
@@ -185,7 +187,20 @@ Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#a
 
 ## Performance and validation
 
-Latest GLM screen (2026-10-27): FP4-Local/own MTP3/TP8/DCP4/524K,
+Upstream integration screen (2026-10-28), same near8K/256-output profile below:
+
+| Tokens/s, category mean | Before | After |
+| --- | ---: | ---: |
+| Prefill | 2,837 | 2,832 |
+| Generation | 88.0 | 92.2 |
+
+Prefill is flat. Generation increased in this short screen as MTP acceptance rose
+67.1%→71.6%; mean verification-cycle time is essentially flat. This is not an
+isolated kernel-speed claim. Images, prefix reuse and
+T1/P.95 sampling pass. SM70 adapters adopt upstream's inactive-route contract and
+new sampling/checkpoint arguments; no new full-context qualification is claimed.
+
+Routed GEMM screen (2026-10-27): FP4-Local/own MTP3/TP8/DCP4/524K,
 FP16 KV/state and vision, with both NVLink quads fully connected and all PCIe
 links at Gen3x8. Same three near8K prompts, 32-token warmup, 256 T0/seed531
 outputs; the compatible recorded control is reused.
@@ -325,8 +340,11 @@ inputs/routes/counts under CUDA graphs, output canaries and targeted Compute
 Sanitizer runs. New collective-only selector integration reuses unchanged kernels;
 its added checks cover eight-rank ownership/padding/concurrent reductions,
 all-layer input identity, actual deep-context appends, images and request reuse.
-Upstream integration passed330focused CPU cases,169runtime-context cases and58GPU
-cases; kernel namespaces/core-patch inventory and affected checks remain auditable.
+The October22 integration passed330focused CPU cases,169runtime-context cases and58GPU
+cases. October28 adds routing/masked-expert graph and canary coverage,22Marlin GPU
+cases and deterministic sampling, plus targeted CPU adapter/ownership tests.
+Five changed-route cases pass Compute Sanitizer with zero errors. Kernel
+namespaces/core-patch inventory and affected checks remain auditable.
 
 Useful checks: [core patch census](v100_plus/check-core-diff.py),
 [indexer kernels](test/registered/kernels/ops/attention/test_sm70_indexer.py),

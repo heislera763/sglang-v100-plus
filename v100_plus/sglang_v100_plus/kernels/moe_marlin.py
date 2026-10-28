@@ -225,6 +225,9 @@ def moe_wna16_marlin_gemm(
     use_atomic_add: bool = False,
     use_fp32_reduce: bool = False,
     is_zp_float: bool = False,
+    expert_ids_are_sorted: bool = False,
+    zero_inactive_output: bool = False,
+    has_inactive_prefix_count: bool = False,
 ) -> torch.Tensor:
     device = a.device
 
@@ -232,11 +235,16 @@ def moe_wna16_marlin_gemm(
     if c_or_none is not None:
         c = c_or_none
     else:
-        c = torch.empty((size_m * top_k, size_n), dtype=a.dtype, device=device)
+        c = torch.zeros((size_m * top_k, size_n), dtype=a.dtype, device=device)
 
     # Early return for zero-size M
     if size_m == 0:
         return c
+
+    if has_inactive_prefix_count and num_tokens_post_padded.numel() != 2:
+        raise ValueError("Marlin inactive-prefix metadata requires two count words")
+    route_counts = num_tokens_post_padded
+    num_tokens_post_padded = route_counts[:1]
 
     # SM70 (V100): dispatch to the marlin_v100 kernel when available. Its op
     # signature differs from the JIT module: it takes `a_scales` (None for
@@ -327,6 +335,8 @@ def moe_wna16_marlin_gemm(
                 partials,
                 bn,
                 bk,
+                padded_count=num_tokens_post_padded,
+                zero_inactive_output=zero_inactive_output,
             )
         if (
             not _sm70_marlin_user_tuning
@@ -375,9 +385,25 @@ def moe_wna16_marlin_gemm(
                 topk_weights,
                 top_k,
                 mul_topk_weights,
+                zero_inactive_output=zero_inactive_output,
             )
         op = _load_marlin_v100_op()
         if op is not None:
+            if zero_inactive_output and c_or_none is not None:
+                from sglang.kernels.ops.moe.zero_inactive_routes import (
+                    zero_inactive_routes,
+                )
+
+                zero_inactive_routes(
+                    c.reshape(size_m * top_k, size_n),
+                    sorted_token_ids,
+                    expert_ids,
+                    route_counts,
+                    moe_block_size,
+                    inactive_prefix_count=has_inactive_prefix_count
+                    and expert_ids_are_sorted
+                    and not is_ep,
+                )
             if (
                 not _sm70_marlin_user_tuning
                 and getattr(b_scales, "_sm70_fp8_scale", False)

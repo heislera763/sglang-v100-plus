@@ -80,7 +80,7 @@ def supports_cache_snapshots(original, view, hf_config):
     return original(view, hf_config)
 
 
-def prepare_cache_checkpoint(original, batch, req):
+def prepare_cache_checkpoint(original, batch, req, *, checkpoint_grid=None):
     """Keep reuse boundaries on the configured persistence grid in both modes.
 
     FP16 stores inside a long FP32 prefill recurrence change its continuation.
@@ -89,9 +89,16 @@ def prepare_cache_checkpoint(original, batch, req):
     from sglang.srt.runtime_context import get_exec, mamba_checkpoint_grid
 
     if get_exec().mamba.linear_attn_backend != "v100_plus":
-        return original(batch, req)
+        return original(batch, req, checkpoint_grid=checkpoint_grid)
+    native_grid = mamba_checkpoint_grid(batch.tree_cache.page_size)
+    if checkpoint_grid is not None and (
+        checkpoint_grid <= 0 or checkpoint_grid % native_grid
+    ):
+        raise ValueError(
+            "Checkpoint grid must be a positive multiple of the cache grid"
+        )
     grid = math.lcm(
-        mamba_checkpoint_grid(batch.tree_cache.page_size),
+        native_grid if checkpoint_grid is None else checkpoint_grid,
         get_exec().mamba.mamba_track_interval,
     )
     return original(batch, req, checkpoint_grid=grid)

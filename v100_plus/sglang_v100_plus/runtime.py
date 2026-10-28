@@ -867,5 +867,11 @@ def top_k_renorm_probs(probs, top_k):
     return _top_k_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_k))
 
 
-def top_p_renorm_probs(probs, top_p):
+def top_p_renorm_probs(probs, top_p, is_deterministic=False):
+    if is_deterministic:
+        from sglang.kernels.ops.sampling.renorm_triton import top_p_renorm_probs_triton
+
+        # Fixed sort/prefix/reduction ordering provides reproducibility on SM70;
+        # FlashInfer's newer integer-histogram implementation is not our backend.
+        return top_p_renorm_probs_triton(probs, top_p)
     return _top_p_renorm_probs_internal(probs, *_to_tensor_scalar_tuple(top_p))

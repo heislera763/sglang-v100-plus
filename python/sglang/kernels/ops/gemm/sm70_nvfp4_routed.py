@@ -19,7 +19,7 @@ import triton.language as tl
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
-def _routed_mma(n, k, topk, mul_router, splits=1):
+def _routed_mma(n, k, topk, mul_router, splits=1, zero_inactive=True):
     bm, bn, bk, block = 16, 128, 64, 8
     nt, nr = T.dynamic("nt"), T.dynamic("nr")
     ns, ne, nb = T.dynamic("ns"), T.dynamic("ne"), T.dynamic("nb")
@@ -89,24 +89,28 @@ def _routed_mma(n, k, topk, mul_router, splits=1):
                         T.gemm(ash, bsh, accum, policy=T.GemmWarpPolicy.FullCol)
                 # Valid route IDs occur once in the padded permutation; each
                 # row/column tile has one writer, including zeroed expert -1.
-                for m, j in T.Parallel(bm, bn):
-                    if m < block:
-                        route = Ids[row * block + m]
-                        if (route >= 0) & (route < nr):
-                            if splits > 1:
-                                C[part, route, col * bn + j] = accum[m, j]
-                            elif expert >= 0:
-                                if mul_router:
-                                    C[0, route, col * bn + j] = T.cast(
-                                        (accum[m, j] * Router[route]) * G[expert],
-                                        T.float16,
-                                    )
-                                else:
-                                    C[0, route, col * bn + j] = T.cast(
-                                        accum[m, j] * G[expert], T.float16
-                                    )
-                            else:
-                                C[0, route, col * bn + j] = 0
+                # Keep this guard outside the vectorized store loop. Otherwise
+                # TileLang can hoist a cast/store out of the per-element branch
+                # and overwrite inactive rows with an uninitialized temporary.
+                if (splits > 1) or zero_inactive or (expert >= 0):
+                    for m, j in T.Parallel(bm, bn):
+                        if m < block:
+                            route = Ids[row * block + m]
+                            if (route >= 0) & (route < nr):
+                                if splits > 1:
+                                    C[part, route, col * bn + j] = accum[m, j]
+                                elif expert >= 0:
+                                    if mul_router:
+                                        C[0, route, col * bn + j] = T.cast(
+                                            (accum[m, j] * Router[route]) * G[expert],
+                                            T.float16,
+                                        )
+                                    else:
+                                        C[0, route, col * bn + j] = T.cast(
+                                            accum[m, j] * G[expert], T.float16
+                                        )
+                                elif zero_inactive:
+                                    C[0, route, col * bn + j] = 0
 
     return nvfp4_routed_sm70
 
@@ -124,6 +128,7 @@ def _finish_routed(
     N: tl.constexpr,
     SPLITS: tl.constexpr,
     MUL_ROUTER: tl.constexpr,
+    ZERO_INACTIVE: tl.constexpr,
 ):
     block, tile = tl.program_id(0), tl.program_id(1)
     if block * 8 < tl.load(COUNT):
@@ -143,7 +148,8 @@ def _finish_routed(
                 :, None
             ]
         value *= tl.load(GLOBAL + expert, expert >= 0, 0)
-        tl.store(OUTPUT + route[:, None] * N + col[None, :], value, valid)
+        write = valid & ((expert >= 0) | ZERO_INACTIVE)
+        tl.store(OUTPUT + route[:, None] * N + col[None, :], value, write)
 
 
 def sm70_nvfp4_routed_gemm(
@@ -158,11 +164,13 @@ def sm70_nvfp4_routed_gemm(
     router,
     topk,
     mul_router,
+    *,
+    zero_inactive_output=True,
 ):
     """Write route-major Half output for block-eight padded expert routing.
 
     Device metadata follows moe_align_block_size: each valid row appears once,
-    padding is >=a.rows*topk, expert -1 produces zero, and padded_count gates
+    padding is >=a.rows*topk, expert -1 produces zero when requested, and padded_count gates
     unused tail metadata. Valid experts lie within the bank; count is bounded
     by sorted_ids. The caller guarantees these device-side values.
     Scale bytes use the encoded Marlin layout. Long, narrow contractions split
@@ -203,7 +211,7 @@ def sm70_nvfp4_routed_gemm(
         and sorted_ids.numel() % 8 == 0
         and expert_ids.numel() == sorted_ids.numel() // 8
         and sorted_ids.numel() >= m * topk
-        and padded_count.numel() == 1
+        and padded_count.numel() in (1, 2)
     ):
         raise ValueError("Unsupported SM70 NVFP4 routed GEMM layout")
     tensors = (
@@ -214,7 +222,7 @@ def sm70_nvfp4_routed_gemm(
         global_scale,
         sorted_ids,
         expert_ids,
-        padded_count,
+        padded_count[:1],
         router,
     )
     if any(t.device != a.device or not t.is_contiguous() for t in tensors):
@@ -228,14 +236,14 @@ def sm70_nvfp4_routed_gemm(
         if splits > 1
         else output.view(1, -1, n)
     )
-    _routed_mma(n, k, topk, mul_router, splits)(
+    _routed_mma(n, k, topk, mul_router, splits, zero_inactive_output)(
         a,
         weight,
         scales.view(torch.uint64),
         global_scale.reshape(-1),
         sorted_ids,
         expert_ids,
-        padded_count.reshape(1),
+        padded_count[:1].reshape(1),
         router.reshape(-1),
         target,
     )
@@ -246,12 +254,13 @@ def sm70_nvfp4_routed_gemm(
             router,
             sorted_ids,
             expert_ids,
-            padded_count,
+            padded_count[:1],
             output,
             m * topk,
             n,
             splits,
             mul_router,
+            zero_inactive_output,
             num_warps=4,
             enable_fp_fusion=False,
         )

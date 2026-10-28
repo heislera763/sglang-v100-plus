@@ -32,7 +32,9 @@ def _history(req):
 
 def prepared_penalties(info):
     """Keep only the immutable penalty kinds/stop mask across forward copies."""
-    orchestrator = info.penalizer_orchestrator
+    # Upstream post-verify graphs carry a compact sampling view without an
+    # orchestrator. Forward copies may carry our prepared penalty metadata.
+    orchestrator = getattr(info, "penalizer_orchestrator", None)
     if orchestrator is None:
         return getattr(info, "_v100_linear_penalties", ())
     return tuple(
@@ -150,6 +152,9 @@ def exact_eagle_sample(
     *,
     watermark_state=None,
     watermark_full_mask=True,
+    simulated_acc_len=None,
+    simulated_acc_len_rng=None,
+    sparse_bonus_argmax=False,
 ):
     if batch.forward_mode.is_idle():
         return original(
@@ -160,11 +165,20 @@ def exact_eagle_sample(
             uno_target_max_top_k=uno_target_max_top_k,
             watermark_state=watermark_state,
             watermark_full_mask=watermark_full_mask,
+            simulated_acc_len=simulated_acc_len,
+            simulated_acc_len_rng=simulated_acc_len_rng,
+            sparse_bonus_argmax=sparse_bonus_argmax,
         )
     info = batch.sampling_info
     if not prepared_penalties(info):
         # The graph does not capture request-owned watermark state.
-        if watermark_state is None and envs.SGLANG_OPT_SM70_SPEC_SAMPLE_GRAPH.get():
+        if (
+            watermark_state is None
+            and simulated_acc_len is None
+            and simulated_acc_len_rng is None
+            and not sparse_bonus_argmax
+            and envs.SGLANG_OPT_SM70_SPEC_SAMPLE_GRAPH.get()
+        ):
             from .sample_graph import sample_graph
 
             return sample_graph(
@@ -183,6 +197,9 @@ def exact_eagle_sample(
             uno_target_max_top_k=uno_target_max_top_k,
             watermark_state=watermark_state,
             watermark_full_mask=watermark_full_mask,
+            simulated_acc_len=simulated_acc_len,
+            simulated_acc_len_rng=simulated_acc_len_rng,
+            sparse_bonus_argmax=sparse_bonus_argmax,
         )
     apply_linear_penalties(verify_input, batch, logits_output.next_token_logits)
     additive, scaling = info.acc_additive_penalties, info.acc_scaling_penalties
@@ -196,6 +213,9 @@ def exact_eagle_sample(
             uno_target_max_top_k=uno_target_max_top_k,
             watermark_state=watermark_state,
             watermark_full_mask=watermark_full_mask,
+            simulated_acc_len=simulated_acc_len,
+            simulated_acc_len_rng=simulated_acc_len_rng,
+            sparse_bonus_argmax=sparse_bonus_argmax,
         )
     finally:
         info.acc_additive_penalties, info.acc_scaling_penalties = additive, scaling

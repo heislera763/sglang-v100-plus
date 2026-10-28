@@ -16,6 +16,10 @@ try:
 except ImportError:
     getcurrent = greenlet = None
 
+from sglang.srt.mem_cache.kv.alloc.id_space import IdSpace, IdSpaceKind
+from sglang.srt.mem_cache.kv.alloc.iteration_ids import IterationIds
+from sglang.srt.mem_cache.kv.alloc.runner_ids import RunnerIds
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase, maybe_stub_sgl_kernel
 
@@ -67,9 +71,11 @@ class TestV100PairedPrefill(CustomTestCase):
             (3802, 4096, 7169),
         ):
             with self.subTest(count=count, prefix=prefix, target=target):
-                batch = SimpleNamespace(
+                batch = ForwardBatch(
+                    forward_mode=ForwardMode.EXTEND,
+                    req_pool_indices=torch.tensor([0]),
+                    seq_lens_sum=prefix + count,
                     batch_size=1,
-                    can_run_tbo=False,
                     input_ids=torch.arange(count),
                     positions=torch.arange(prefix, prefix + count),
                     out_cache_loc=torch.arange(count) + 1024,
@@ -81,14 +87,38 @@ class TestV100PairedPrefill(CustomTestCase):
                     extend_prefix_lens_cpu=[prefix],
                     extend_start_loc=torch.tensor([0]),
                     mrope_positions=None,
-                    kv_loc_plan=None,
+                    iteration_ids=None,
                     mamba_track_seqlens_cpu=[target],
                     mamba_track_seqlens=torch.tensor([target]),
                     mamba_prefill_track_mask_cpu=[True],
                     mamba_track_mask=torch.tensor([True]),
                 )
+                reader = RunnerIds(
+                    req_to_token=torch.zeros(1, prefix + count, dtype=torch.int64),
+                    token_to_kv_pool_allocator=None,
+                    token_to_kv_pool=SimpleNamespace(
+                        id_spaces=lambda: {IdSpaceKind.FULL: IdSpace(key="full")}
+                    ),
+                    page_size=256,
+                    device="cpu",
+                )
+                batch.iteration_ids = IterationIds(
+                    source=reader,
+                    req_pool_indices=batch.req_pool_indices,
+                    seq_lens=batch.seq_lens,
+                    seq_lens_cpu=batch.seq_lens_cpu,
+                    write_virtual=batch.out_cache_loc,
+                )
                 with patch.object(p, "mamba_cache_chunk_size", return_value=256):
                     a, b = p._split_batch(batch)
+                for child in (a, b):
+                    self.assertIs(child.iteration_ids, batch.iteration_ids)
+                    torch.testing.assert_close(
+                        child.iteration_ids.write_ids(
+                            reader, cols=child.iteration_cols
+                        ),
+                        child.out_cache_loc,
+                    )
                 torch.testing.assert_close(
                     torch.cat((a.input_ids, b.input_ids)), batch.input_ids
                 )

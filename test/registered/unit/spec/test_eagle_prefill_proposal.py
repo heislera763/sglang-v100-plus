@@ -30,6 +30,7 @@ class TestEaglePrefillProposal(CustomTestCase):
         logits = torch.tensor([[0.04, 0.0]]).repeat(64, 1)
         sampling = SimpleNamespace(
             temperatures=torch.ones(64, 1),
+            sampling_seed=None,
             top_ks=torch.tensor([1] * 32 + [TOP_K_ALL] * 32, dtype=torch.int32),
         )
         batch = SimpleNamespace(
@@ -38,6 +39,7 @@ class TestEaglePrefillProposal(CustomTestCase):
             extend_lens=[1] * 64,
             chunked_req_next_prompt_token=None,
             sampling_info=sampling,
+            seq_lens=torch.ones(64, dtype=torch.int64),
         )
         hidden = torch.zeros(64, 4)
         runner = SimpleNamespace(

@@ -27,6 +27,41 @@ with patch.object(
 
 
 class TestV100Prefill(CustomTestCase):
+    def test_explicit_checkpoint_grid_preserves_native_and_fp16_boundaries(self):
+        from sglang_v100_plus.attention import prepare_cache_checkpoint
+
+        batch = SimpleNamespace(tree_cache=SimpleNamespace(page_size=256))
+        req = SimpleNamespace(end=8191)
+
+        def original(batch, req, *, checkpoint_grid=None):
+            grid = checkpoint_grid or 256
+            return grid, (req.end // grid) * grid
+
+        with (
+            get_context().override_server_args(
+                model_path="dummy",
+                linear_attn_backend="v100_plus",
+                mamba_track_interval=2048,
+            ),
+            patch("sglang.srt.runtime_context.mamba_checkpoint_grid", return_value=256),
+        ):
+            for requested, expected in (
+                (None, (2048, 6144)),
+                (4096, (4096, 4096)),
+                (3072, (6144, 6144)),
+            ):
+                self.assertEqual(
+                    prepare_cache_checkpoint(
+                        original, batch, req, checkpoint_grid=requested
+                    ),
+                    expected,
+                )
+            for invalid in (0, -256, 300):
+                with self.assertRaises(ValueError):
+                    prepare_cache_checkpoint(
+                        original, batch, req, checkpoint_grid=invalid
+                    )
+
     def test_glm_paired_mhc_keeps_full_rows_without_gathering(self):
         """Active chunk scheduling uses replicated PRE without a local gather.
 

@@ -407,7 +407,9 @@ class TestV100StrictDispatch(CustomTestCase):
         scalar = SimpleNamespace(id=31)
         fake_bank = SimpleNamespace(shape=(288, 256, 2048))
         scales = SimpleNamespace(dtype=torch.float8_e4m3fn)
-        routed = SimpleNamespace(sm70_nvfp4_routed_gemm=lambda *args: args[1].fill_(7))
+        routed = SimpleNamespace(
+            sm70_nvfp4_routed_gemm=lambda *args, **kwargs: args[1].fill_(7)
+        )
         raw = lambda *args: args[1].fill_(3)
         base = dict(
             a=a,
@@ -535,13 +537,17 @@ class TestFP16ExpertDispatchContract(CustomTestCase):
             {"BLOCK_SIZE_M": 16},
         )
         with envs.SGLANG_DEBUG_V100_STRICT_DISPATCH.override(True):
-            with self.assertRaises(V100FallbackError):
-                invoke_fp16_moe(
-                    lambda *a, **kw: None,
-                    *args,
-                    compute_type=tl.float16,
-                    fuse_swiglu=True,
-                )
+            for options in ({"fuse_swiglu": True}, {"a_output_slices": 2}):
+                with (
+                    self.subTest(options=options),
+                    self.assertRaises(V100FallbackError),
+                ):
+                    invoke_fp16_moe(
+                        lambda *a, **kw: None,
+                        *args,
+                        compute_type=tl.float16,
+                        **options,
+                    )
 
 
 if __name__ == "__main__":
