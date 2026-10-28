@@ -8,7 +8,7 @@
     "python/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py": "FP16 sparse MLA prefill dispatch and shared SM70 small-row tile policy for target verification.",
     "python/sglang/kernels/ops/attention/dsa/triton_sparse_mla_decode.py": "Preserve FP16 output and shared SM70 small-row geometry while using upstream consolidated fused/split-K kernels.",
     "python/sglang/kernels/ops/gemm/__init__.py": "Register Volta packed-FP8 and encoded-NVFP4 GEMV and small-row routed MMA implementations.",
-    "python/sglang/kernels/ops/gemm/sm70_nvfp4_gemv.py": "Volta NVFP4 GEMV for supported single-token projections.",
+    "python/sglang/kernels/ops/gemm/sm70_nvfp4_gemv.py": "FP32-accumulating NVFP4 GEMV over native SM70 Marlin packed weights/scales, with device-counted masked routing and caller-selected inactive-output preservation/clearing.",
     "python/sglang/kernels/jit/csrc/gemm/sm70_fp8_gemv.cuh": "SM70 packed-word FP8 GEMV through eight verification rows with scale reuse, FP16 reconstructed operands and FP32 partial sums; lazy JIT helper for the registered GEMM operator.",
     "python/sglang/kernels/ops/layernorm/__init__.py": "Register SM70 full/sharded fused mHC with lazy JIT preparation and bulk token-shard operators.",
     "python/sglang/kernels/ops/layernorm/mhc_post_split_h.py": "Select the SM70-compatible FP16/FP32 mHC post-combine path.",
@@ -49,7 +49,6 @@
     "python/sglang/srt/multimodal/processors/base_processor.py": "Preserve exact image prompt expansion; honor CPU image placement for preprocessing and JPEG decode without allocating a second patch bank on the serving GPU.",
     "python/sglang/srt/arg_groups/model_overrides/deepseek_v2.py": "Permit native V100 DCP with replicated pool4 indexers and explicit V100 sparse backends; other backends retain the pooled-index restriction.",
     "python/sglang/kernels/ops/kvcache/mla_buffer.py": "Zero-RoPE MLA writes must honor DCP owner selection, local row collapse and reserved padding slots, matching the existing RoPE writer.",
-    "python/sglang/srt/layers/quantization/marlin_utils_fp4.py": "Apply logical output bias after cropping padded NVFP4 Marlin rows, enabling biased quantized vision projections without shape mismatch.",
     "python/sglang/srt/models/glm5_next_nextn.py": "GLM MTP integration. Preserve fused source-module quantization mappings and share the complete target LM head, including scales and execution metadata.",
     "python/sglang/kernels/ops/gemm/sm70_fp8_gemv.py": "Volta packed E4M3 small-row GEMV through eight verification rows, group32/group128 scales, FP16 reconstructed operands/output and FP32 split-K reductions; caller-owned capacity-bounded scratch and padded logical widths.",
     "python/sglang/kernels/ops/gemm/sm70_fp8_gemm.py": "Volta packed E4M3 prefill GEMM: transient projection-sized FP16 unpacking, native FP16 Tensor Cores with FP32 accumulation/output before final FP16 rounding; no resident FP16 weight expansion.",
@@ -59,6 +58,7 @@
     "python/sglang/srt/entrypoints/openai/parallel_prompt_encode.py": "Limit HF prompt chunking to native HF backends so alternative encoders such as fastokens retain their own parallelism and avoid unsupported postprocessor introspection.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer_prefill.py": "Dynamic-history Volta MMA prefill index scoring with fused FP32 head reduction/scaling; adjacent queries reuse one key tile and the same query/accumulator scratch, preserving24KiB shared memory.",
     "python/sglang/kernels/ops/attention/metadata.py": "Bound sparse top-k backscan loads for non-block-aligned selected widths.",
-    "python/sglang/kernels/ops/attention/linear/fused_sigmoid_gating_recurrent.py": "Optional FP16 recurrent state rounding at each verification step."
+    "python/sglang/kernels/ops/attention/linear/fused_sigmoid_gating_recurrent.py": "Optional FP16 recurrent state rounding at each verification step.",
+    "python/sglang/kernels/ops/moe/zero_inactive_routes.py": "GPU-counted inactive-route clearing for native SM70 GEMMs; preserve omitted output rows and skip unused routing capacity under upstream sorted-prefix or scattered-expert contracts."
   }
 }

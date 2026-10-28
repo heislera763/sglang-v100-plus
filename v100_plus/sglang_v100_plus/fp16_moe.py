@@ -27,6 +27,7 @@ _OPTIONS = (
     "mask_output",
     "lora_preserve_base",
     "fuse_swiglu",
+    "a_output_slices",
 )
 
 
@@ -58,6 +59,7 @@ def invoke_fp16_moe(original, *args, **kwargs):
         options.get("compute_type") != tl.float16
         or any(v is not None for v in (bias, a_scale, b_scale, b_zp))
         or any(options.get(name, False) for name in unsupported)
+        or options.get("a_output_slices", 1) != 1
         or options.get("block_shape") is not None
         or options.get("add_output_mask") is not None
         or set(options) - set(_OPTIONS)

@@ -214,6 +214,13 @@ class TestV100Sampling(CustomTestCase):
             exact_eagle_sample(lambda *_args, **_kwargs: "warmup", None, batch, None),
             "warmup",
         )
+        del batch.sampling_info.penalizer_orchestrator
+        self.assertEqual(
+            exact_eagle_sample(
+                lambda *_args, **_kwargs: "graph-view", None, batch, None
+            ),
+            "graph-view",
+        )
 
     def test_watermark_options_reach_native_sampling(self):
         batch = Batch([Request([1])])
@@ -282,6 +289,42 @@ class TestV100Sampling(CustomTestCase):
         torch.testing.assert_close(
             actual_logits, output.next_token_logits, rtol=0, atol=0
         )
+
+    def test_simulated_acceptance_options_survive_the_adapter(self):
+        """New upstream verify kwargs must reach eager sampling, never a stale graph."""
+        injected = torch.tensor([2])
+        generator = torch.Generator().manual_seed(531)
+
+        def native(plan, batch, output, mask, **kwargs):
+            return (
+                kwargs["simulated_acc_len"],
+                kwargs["simulated_acc_len_rng"],
+                kwargs["sparse_bonus_argmax"],
+            )
+
+        for penalized in (False, True):
+            batch = Batch([Request([1], presence_penalty=1.5 if penalized else 0)])
+            plan = SimpleNamespace(
+                tree_topk=1,
+                draft_token_num=1,
+                max_tree_depth=1,
+                draft_token=torch.tensor([1]),
+                positions=torch.tensor([2]),
+            )
+            output = SimpleNamespace(next_token_logits=torch.ones(1, 8))
+            with envs.SGLANG_OPT_SM70_SPEC_SAMPLE_GRAPH.override(True):
+                actual = exact_eagle_sample(
+                    native,
+                    plan,
+                    batch,
+                    output,
+                    simulated_acc_len=injected,
+                    simulated_acc_len_rng=generator,
+                    sparse_bonus_argmax=True,
+                )
+            self.assertIs(actual[0], injected)
+            self.assertIs(actual[1], generator)
+            self.assertTrue(actual[2])
 
     def test_forward_copy_keeps_exact_penalties_without_the_orchestrator(self):
         batch, plan, expected = self.check_prefixes(

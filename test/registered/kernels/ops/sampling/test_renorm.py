@@ -23,6 +23,22 @@ else:
     from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 0),
+    reason="SM70 plugin sampling contract",
+)
+def test_sm70_deterministic_top_p_preserves_cutoff_ties():
+    from sglang_v100_plus.runtime import top_p_renorm_probs
+
+    probs = torch.tensor([[0.1, 0.1, 0.2, 0.2, 0.4]], device="cuda")
+    expected = torch.tensor([[0, 0, 0.25, 0.25, 0.5]], device="cuda")
+    first = top_p_renorm_probs(probs, 0.5, is_deterministic=True)
+    torch.testing.assert_close(first, expected, rtol=0, atol=0)
+    for _ in range(3):
+        actual = top_p_renorm_probs(probs, 0.5, is_deterministic=True)
+        assert torch.equal(actual, first)
+
+
 @pytest.mark.parametrize("batch_size", [1, 99, 989])
 @pytest.mark.parametrize("vocab_size", [111, 32000, 128256])
 @pytest.mark.parametrize("k", [10, 100, 500])

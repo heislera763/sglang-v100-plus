@@ -123,6 +123,61 @@ def test_checkpoint_reference_and_graph_replay(m, topk, n, k):
             expected *= cpu_router[:, None]
         torch.testing.assert_close(out.cpu().float(), expected, rtol=0.01, atol=0.015)
 
+    # New routing producers coalesce masked routes and leave unused capacity
+    # unwritten. Neither negative experts nor tail blocks may read weights.
+    if routes == 8:
+        count = torch.tensor([3 * block, 1], device="cuda", dtype=torch.int32)
+        sorted_ids.fill_(routes)
+        sorted_ids[:2] = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        sorted_ids[block] = 2
+        sorted_ids[2 * block] = 3
+        expert_ids.fill_(123456)
+        expert_ids[:3] = torch.tensor([-1, 2, -1], device="cuda", dtype=torch.int32)
+        for zero in (False, True):
+            out.fill_(17)
+
+            def masked():
+                return sm70_nvfp4_gemv(
+                    a,
+                    out,
+                    weight,
+                    encoded,
+                    global_scale,
+                    sorted_ids,
+                    expert_ids,
+                    router,
+                    block,
+                    topk,
+                    mul_router,
+                    partials,
+                    block_k=128,
+                    padded_count=count,
+                    zero_inactive_output=zero,
+                )
+
+            masked()
+            replay = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(replay):
+                masked()
+            out.fill_(17)
+            replay.replay()
+            torch.cuda.synchronize()
+            expected = torch.full((routes, n), 17.0)
+            expected[2] = a[2 // topk].cpu().float() @ reference_weight[2].T
+            if mul_router:
+                expected[2] *= router[2].item()
+            if zero:
+                expected[[0, 1, 3]] = 0
+            torch.testing.assert_close(
+                out.cpu().float(), expected, rtol=0.01, atol=0.015
+            )
+            count.zero_()
+            out.fill_(17)
+            replay.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(out, torch.full_like(out, 17))
+            count[0] = 3 * block
+
 
 @pytest.mark.parametrize(
     "m,topk,n,k,mul_router",
@@ -185,7 +240,7 @@ def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):
     out = storage[: routes * n].view(routes, n)
     sorted_ids = torch.full((16 * 8,), routes, device="cuda", dtype=torch.int32)
     expert_ids = torch.full((16,), 123456, device="cuda", dtype=torch.int32)
-    count = torch.zeros(1, device="cuda", dtype=torch.int32)
+    count = torch.zeros(2, device="cuda", dtype=torch.int32)
 
     def metadata(offset):
         selected = (torch.arange(routes) + offset) % e
@@ -200,10 +255,10 @@ def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):
                 cursor += 1
         sorted_ids.copy_(ids)
         expert_ids.copy_(experts)
-        count.fill_(cursor * 8)
+        count[0] = cursor * 8
         return selected
 
-    def run():
+    def run(zero=True):
         return sm70_nvfp4_routed_gemm(
             a,
             out,
@@ -216,6 +271,7 @@ def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):
             router,
             topk,
             mul_router,
+            zero_inactive_output=zero,
         )
 
     selected = metadata(0)
@@ -242,6 +298,12 @@ def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):
         torch.testing.assert_close(out.cpu(), expected.half(), rtol=0.001, atol=0.0002)
         assert torch.isfinite(out).all()
         assert torch.equal(storage[-64:], torch.full_like(storage[-64:], 17.0))
+
+    # The caller may request preservation instead of clearing inactive rows.
+    out.fill_(17)
+    run(False)
+    expected[selected == e - 1] = 17
+    torch.testing.assert_close(out.cpu(), expected.half(), rtol=0.001, atol=0.0002)
 
     # Replaying an empty schedule must not read stale partials or invalid tail
     # experts, and must leave both the output and its canary untouched.

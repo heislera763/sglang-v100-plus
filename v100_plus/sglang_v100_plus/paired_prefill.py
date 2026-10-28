@@ -159,9 +159,9 @@ def _split_batch(batch):
         child.global_num_token_non_padded_cpu = stop - start
         child.global_num_token_non_padded = None
         child.tbo_parent_token_range = None
-        if batch.kv_loc_plan is not None:
-            child.kv_loc_cols = batch.kv_loc_plan.cols_slice(
-                batch.kv_loc_cols, slice(start, stop)
+        if batch.iteration_ids is not None:
+            child.iteration_cols = batch.iteration_ids.cols_slice(
+                batch.iteration_cols, slice(start, stop)
             )
         if batch.mamba_track_seqlens_cpu is not None:
             target = batch.mamba_track_seqlens_cpu[0]
