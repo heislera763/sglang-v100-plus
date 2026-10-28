@@ -8,7 +8,10 @@ questions, not evidence that any proposed intervention already works.
 **Resume here:** `main` and `dev` are aligned and pushed at validated `cdf91e2bf`,
 including upstream `59af99a8`; that merge is now in `experimental` too.
 The bounded FFN-only pilot is implemented in [ffn_repeat.py](ffn_repeat.py), with
-[ownership controls](check_controls.py). Its actual-model run is pending. The
+[ownership controls](check_controls.py). Its first actual-model pilot is complete:
+no demonstrated capability gain, with the long-prompt causal control unresolved.
+See [results and disposition](#2026-10-28--ffn-only-pilot-results). All owned
+workers are stopped and public hosting remains down. The
 earlier integration handoff below is historical; do not reapply its patches.
 
 ## 2026-10-28 — Charter and starting point
@@ -406,6 +409,86 @@ These cases are a tiny pilot, not a held-out accuracy estimate. Require exact
 off/zero token identity, actual hook execution on all eight ranks, finite state
 changes and prefix reuse. Logs, raw prompts/results and controller stay at
 `~/sglang-workspace/frozen-model-20261028/ffn-pilot/`.
+
+## 2026-10-28 — FFN-only pilot results
+
+Source `e3349102f`, private `glm-frozen-ffn-pilot-20261028`. All eight ranks
+registered and executed the hook; graph phases and MTP were disabled as intended.
+The one-process pilot completed all three arms. Eager decode was only about4TPS,
+far below the graph/MTP serving profile. Its initial900s supervisor timeout was
+too short for this measured rate. A bounded guard suspended only the idle
+supervisor until its client exited; model/client execution and timing were
+untouched, and the original systemd hard deadline remained. No reload or grid.
+
+Ordinary arithmetic/code/logic answers are5263/387/A and the zero-strength arm
+matches their entire78/435/397-token outputs. The near8K and cached-continuation
+sequences diverge at token24/12 despite zero mixing. Two additional64-token
+off/off requests also differ from each other, the original off arm and the zero
+arm. Thus exact long-prompt token agreement is not a valid isolated-intervention
+test in this runtime. This demonstrates baseline variation, not its cause and
+not that an extra FFN has no side effects. The two ordinary repeats first differ
+at token24; all five actual near8K prompt-token arrays are identical (7903tokens).
+The small-case identity results are stronger evidence for this pilot; wider
+causal claims remain blocked. The original all-cases identity assertion therefore
+fails, deliberately preserved in the controller result; this is not a CUDA crash.
+
+The untimed zero observation reports finite candidate states and zero mixing
+delta, but its `zero_identity` field compares the returned anchor with the mixed
+alias. It does not independently prove the anchor's pre-call contents survived.
+A future native mutation control must own a pre-call copy and compare it after
+the extra FFN, alongside fixed-input logits/selected-key observations. Do not
+present the existing observer as that proof.
+
+All three damped answers remain correct. These easy cases already had a perfect
+ordinary score, so they cannot establish an accuracy improvement.
+
+| Case | Ordinary answer | Damped answer | Ordinary output tokens | Damped output tokens |
+| --- | --- | --- | ---: | ---: |
+| Arithmetic | 5263 | 5263 | 78 | 290 |
+| Short code | 387 | 387 | 435 | 412 |
+| Logic | A | A | 397 | 384 |
+
+Arithmetic adds a second check and a longer final explanation. Two cases shorten
+slightly, but total output grows910→1086tokens and total completion time
+232.19→279.45seconds (+20.4%). No output cap was reached on these three cases.
+This is case evidence, not a held-out benchmark or general quality estimate.
+
+One coherent near8K/256-output throughput screen; both columns use the same eager,
+MTP-off setup and no-op logit processor. Do not compare these decode rates with
+the graph/MTP production results above.
+
+| Tokens/s | Ordinary | Extra FFN, strength0.25 |
+| --- | ---: | ---: |
+| Prefill | 2,889.54 | 2,900.55 |
+| Decode | 4.05 | 3.87 |
+
+Prefill is effectively flat; decode is about4.4% lower. Zero-strength extra
+computation measures2,914.46prefill/3.85decodeTPS. These are one-request cost
+screens, not statistically established gains. Each arm reuses6144tokens on its
+continuation. Do not claim the faster later continuation prefill as an
+optimization: first-shape/cold effects were not isolated. Extra off/off controls
+queued serially; native throughput intervals exclude their queue wait.
+
+Untimed last-position observations are finite. An undamped repeat moves the
+state by41.7%/43.2% of its norm at the sampled prefill/decode positions;0.25mixing
+reduces this to10.4%/10.8%. Cosines before mixing are0.951/0.948. These describe
+movement, not semantic refinement, and are only two sampled positions.
+
+**Disposition:** retain the implementation as a research control on `experimental`
+only. No demonstrated capability benefit, no production/default change, no reason
+to expand a strength/layer sweep from this pilot. Main/dev stay at `cdf91e2bf`.
+
+**Next bounded step:** compare fixed inputs with an independently owned pre-call
+residual snapshot, post-call mutation checks and selected-key/logit observations.
+Separate ordinary numerical variation from intervention effects before repeating
+full blocks or claiming semantic improvement. Use short diagnostic outputs first;
+any later graph support must explicitly capture the hook rather than silently
+skipping it. Lens fitting and full repeated-attention histories remain deferred.
+
+Raw evidence and full report:
+`~/sglang-workspace/frozen-model-20261028/ffn-pilot/REPORT.md` and `analysis.json`.
+The supervisor resumed, every owned worker stopped, and no GPU compute processes
+remained after completion. Public hosting stayed down throughout.
 
 ## Journal entry template
 
