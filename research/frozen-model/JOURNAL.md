@@ -5,11 +5,11 @@ implementation decisions, controls, negative results and the next bounded step.
 The owner's [original brief](BRIEF.txt) is the research charter. It is a set of
 questions, not evidence that any proposed intervention already works.
 
-**Resume here:** the brief and journal are committed on `experimental`, based on
-validated `3a7f04fb`. The separate `dev` worktree has an unfinished upstream merge;
-its first model smoke failed at the Marlin adapter. See the
-[latest handoff](#2026-10-28--checkpoint-after-the-first-upstream-smoke) before
-continuing. No frozen-model intervention has been implemented or benchmarked yet.
+**Resume here:** `main` and `dev` are aligned and pushed at validated `cdf91e2bf`,
+including upstream `59af99a8`; that merge is now in `experimental` too.
+The bounded FFN-only pilot is implemented in [ffn_repeat.py](ffn_repeat.py), with
+[ownership controls](check_controls.py). Its actual-model run is pending. The
+earlier integration handoff below is historical; do not reapply its patches.
 
 ## 2026-10-28 — Charter and starting point
 
@@ -341,6 +341,71 @@ It does **not** establish the behavior of a full repeated-depth transformer.
   Keep observations outside timed requests. Use short, checkable prompts and
   report both prefill/decode cost plus behavioral changes; no 524K qualification
   or claim of general capability improvement from a handful of cases.
+
+## 2026-10-28 — Upstream integration completed
+
+Merged 479 upstream commits through `59af99a873f3`; validated fork `cdf91e2bf` is
+on main/dev/origin and merged here. All maintenance code remains outside this
+research directory. Full details and failures:
+`~/sglang-workspace/frozen-model-20261028/MAINTENANCE.md`.
+
+Adopt upstream cache/state/iteration ownership, segmented rendering and seeded
+draft proposals. Remove the superseded Marlin bias patch. Adapt inactive-route
+counts/zeroing for native Marlin, routed MMA and GEMV, preserving omitted rows.
+Do not exclude the single-token GEMV to hide a contract gap. Auditing all 69
+registered hooks found additional checkpoint/sampling argument changes, now
+forwarded or explicitly implemented. Upstream post-verify graphs exclude the
+classical draft-probability path and do not replace our optional sampling graph.
+
+The first full-model smoke failed on the new Marlin keywords; the second failed
+on new sampling keywords. Both are fixed. During GPU contract testing, TileLang
+hoisted an inactive-row store; an outer block guard fixes it. Twenty-two Marlin
+GPU tests, deterministic sampling, targeted CPU ownership/adapter tests and five
+Compute Sanitizer cases pass (zero memory errors). Core census remains 60 paths.
+No unrelated upstream whitespace cleanup was mixed into the merge.
+
+One successful private process reuses the compatible October27 baseline:
+FP4-Local/own MTP3, TP8/DCP4/EP1, 524K/FP16 KV/state/vision, paired4096/2048,
+three coherent near8K categories, 32-token warmup/256 T0 outputs, seed531.
+
+| Tokens/s, category mean | Before | After |
+| --- | ---: | ---: |
+| Prefill | 2,837.18 | 2,832.13 |
+| Decode | 87.99 | 92.25 |
+
+Acceptance increases 67.11% to 71.58%; cycle-time proxy is nearly flat
+34.16 to 33.98 ms. All three greedy messages change. Treat this as a functional
+integration/performance screen, not an isolated kernel gain or bit-exact model
+equivalence. Image execution, 6144-token image-prefix reuse and T1/P.95 sampling
+pass. No new full-context or Qwen qualification. Public hosting remains down;
+the smoke workers were stopped.
+
+## 2026-10-28 — FFN-only pilot implementation
+
+Question: does one damped extra FFN/mHC application at layer23 meaningfully change
+behavior, and what does it cost? This is a state-safe exploratory control, not a
+reproduction of repeated full transformer blocks or a fitted semantic lens.
+
+The existing forward-hook API selects `model.layers.23`. Require eager execution
+for both phases, no MTP, TP8/EP1/PP1 and a fully written FP16 four-stream boundary.
+Clone that state; reuse the original FFN PRE/norm, shared+routed MLP, its owed TP
+sum and FFN POST. Blend in FP32 and cast once. Never execute attention a second
+time. Changed later-layer histories are then ordinary histories of this declared
+intervention. Store the mixed state through the residual ownership API.
+
+Three arms share one process and a no-op logit processor: off; extra computation
+with zero-strength output mixing; repeat with strength0.25. Separate cache salts
+isolate arms. The zero arm returns the exact original state, including when
+scratch is borrowed. CPU controls exercise aliasing and forward-flag restoration.
+Only explicit untimed requests synchronize for last-position state observations.
+
+Bounded execution: 16K context/4608 physical slots, same checkpoint and kernels,
+strict dispatch, one coherent near8K/256-output throughput request per arm plus
+cached continuation; three fixed arithmetic/code/logic cases capped at512 outputs.
+These cases are a tiny pilot, not a held-out accuracy estimate. Require exact
+off/zero token identity, actual hook execution on all eight ranks, finite state
+changes and prefix reuse. Logs, raw prompts/results and controller stay at
+`~/sglang-workspace/frozen-model-20261028/ffn-pilot/`.
 
 ## Journal entry template
 
