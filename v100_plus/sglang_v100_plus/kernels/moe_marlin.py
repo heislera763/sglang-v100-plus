@@ -44,6 +44,35 @@ _sm70_marlin_user_tuning = any(os.getenv(name) for name in _SM70_MARLIN_MOE_ENV_
 _sm70_nvfp4_tuning_stage = None
 
 
+def route_block_size(original, hidden, ids, w1, w2, scales):
+    """Keep route alignment and the selected Volta GEMM row tile together."""
+    from sglang.srt.runtime_context import get_schedule
+
+    from ..fp8 import fp8_route_block_size
+
+    if (
+        _IS_SM70
+        and not _sm70_marlin_user_tuning
+        and get_schedule().disable_overlap_schedule
+        and get_schedule().max_running_requests == 1
+        and hidden.is_cuda
+        and hidden.dtype == torch.float16
+        and scales.dtype == torch.float8_e4m3fn
+        and hidden.ndim == 2
+        and hidden.shape[0] >= 1024
+        and hidden.shape[1] == 6144
+        and ids.shape == (hidden.shape[0], 4)
+        and ids.dtype == torch.int32
+        and tuple(w1.shape) == (128, 384, 1536)
+        and tuple(w2.shape) == (128, 24, 12288)
+    ):
+        # Generic alignment picks 48 here, requiring two 32-row CTA tiles.
+        # The cached-input 64-row kernel is faster than both that schedule and
+        # plain 32-row alignment on MiniMax's captured gate/up and down banks.
+        return 64
+    return fp8_route_block_size(original, hidden, ids, w1, w2, scales)
+
+
 def _configure_sm70_nvfp4_stage(
     b_scales: torch.Tensor,
     moe_block_size: int,
@@ -142,6 +171,8 @@ def _configure_sm70_nvfp4_stage(
                 and 1024 <= size_m <= 16384
                 and (size_n, size_k) in ((4096, 256), (4096, 512))
             )
+            or (top_k == 4 and size_m >= 1024 and (size_n, size_k) == (768, 6144))
+            or (top_k == 1 and size_m >= 4096 and (size_n, size_k) == (6144, 384))
         )
     ):
         # A 32-row CTA reloads decoded weights for each half of the aligned

@@ -45,12 +45,12 @@ def install():
         fp8_marlin_scalar_type,
         fp8_minimum_capability,
         fp8_quant_method,
-        fp8_route_block_size,
         mixed_quant_method,
         prepare_fp8_dense,
         prepare_fp8_moe,
     )
     from .fp16_moe import invoke_fp16_moe
+    from .kernels.moe_marlin import route_block_size
     from .pipeline import (
         initialize_local_output,
         receive_output,
@@ -209,7 +209,7 @@ def install():
         ),
         (
             "sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe.select_marlin_moe_block_size",
-            fp8_route_block_size,
+            route_block_size,
             HookType.AROUND,
         ),
         (

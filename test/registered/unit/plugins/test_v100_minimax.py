@@ -1,5 +1,6 @@
 """MiniMax adapters preserve fixed RoPE and live-prefix verify semantics."""
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +22,52 @@ with patch.object(
 
 
 class TestMiniMaxSM70Adapters(CustomTestCase):
+    def test_prefill_route_alignment_selects_matching_cached_row_tile(self):
+        """48-row alignment must not silently retain two 32-row GEMM tiles."""
+        from sglang_v100_plus.kernels import moe_marlin
+
+        hidden = SimpleNamespace(
+            shape=(1024, 6144), ndim=2, dtype=torch.float16, is_cuda=True
+        )
+        ids = SimpleNamespace(shape=(1024, 4), dtype=torch.int32)
+        w1 = SimpleNamespace(shape=(128, 384, 1536))
+        w2 = SimpleNamespace(shape=(128, 24, 12288))
+        scales = SimpleNamespace(dtype=torch.float8_e4m3fn)
+        original = unittest.mock.Mock(return_value=48)
+        with (
+            get_context().override_server_args(
+                model_path="dummy",
+                max_running_requests=1,
+                disable_overlap_schedule=True,
+            ),
+            patch.object(moe_marlin, "_IS_SM70", True),
+            patch.object(moe_marlin, "_sm70_marlin_user_tuning", False),
+            patch.dict("os.environ", {}),
+            patch.object(moe_marlin, "_sm70_nvfp4_tuning_stage", None),
+        ):
+            block = moe_marlin.route_block_size(original, hidden, ids, w1, w2, scales)
+            self.assertEqual(block, 64)
+            original.assert_not_called()
+            for topk, m, n, k in ((4, 1024, 768, 6144), (1, 4096, 6144, 384)):
+                moe_marlin._configure_sm70_nvfp4_stage(scales, block, topk, m, n, k)
+                self.assertEqual(
+                    os.environ["SM70_MARLIN_MOE_CTA_GEOMETRY"],
+                    "64x256x32x4x64x64x32",
+                )
+                self.assertEqual(os.environ["SM70_MARLIN_MOE_SPLIT_K"], "1")
+            # Decode's 8-row alignment, short tails, and operator-selected
+            # geometries must retain their existing dispatch.
+            hidden.shape, ids.shape = (8, 6144), (8, 4)
+            self.assertEqual(
+                moe_marlin.route_block_size(original, hidden, ids, w1, w2, scales), 48
+            )
+            hidden.shape, ids.shape = (1024, 6144), (1024, 4)
+            with patch.object(moe_marlin, "_sm70_marlin_user_tuning", True):
+                self.assertEqual(
+                    moe_marlin.route_block_size(original, hidden, ids, w1, w2, scales),
+                    48,
+                )
+
     def test_quad_stripes_partition_unaligned_messages(self):
         """Remainders must neither disappear nor acquire a second writer."""
         for count in (32768, 49152, 49153, 49167, 6291456):

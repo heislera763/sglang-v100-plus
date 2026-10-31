@@ -238,14 +238,21 @@ cache flushed per request, profiling excluded. These are preliminary local rates
 
 | Category | Prefill tokens/s | Generation tokens/s | Draft acceptance |
 | --- | ---: | ---: | ---: |
-| Coding | 1483 | 75.3 | 50.4% |
-| Writing | 1548 | 53.2 | 30.7% |
-| Document analysis | 1545 | 50.2 | 27.1% |
-| Mean | 1525 | 59.6 | 36.0% |
+| Coding | 1763 | 75.9 | 50.4% |
+| Writing | 1811 | 53.5 | 30.7% |
+| Document analysis | 1808 | 50.4 | 27.1% |
+| Mean | 1794 | 59.9 | 36.0% |
 
-The compatible [3b8321aa1 baseline](https://github.com/heislera763/sglang-v100-plus/commit/3b8321aa1)
-averaged 824 prefill/45.4 generation tokens/s: **+85%/+31%** with the same weights, caches and
-sampling. NVLink distribution through three healthy PCIe endpoints avoids the
+Matching expert routing to the existing 64-row cached-input Marlin tile improves
+prefill **17.6%** over [75b1fb1b0](https://github.com/heislera763/sglang-v100-plus/commit/75b1fb1b0)
+(1525/59.6 tokens/s); generation is unchanged. All three messages and acceptance
+values match. Generic 48-row alignment previously required two 32-row GEMM tiles.
+The retained schedule beats plain 32-row alignment on captured gate/up and down banks,
+with 1.78× aggregate operator speedup and bit-exact outputs.
+
+Earlier transport and FP8 work raised the compatible [3b8321aa1 baseline](https://github.com/heislera763/sglang-v100-plus/commit/3b8321aa1)
+from 824/45.4 to 1525/59.6 tokens/s with the same weights, caches and sampling.
+NVLink distribution through three healthy PCIe endpoints avoids the
 Gen1x8 uplink without excluding its GPU from compute. Four-CTA subgroup
 communicators bound VRAM; eager gathers reuse the graph communicator. Reordered
 FP16 sums change greedy sequences and acceptance, so the full generation gain
@@ -259,6 +266,8 @@ FP64 kernel references, changing-input graph replay/canaries and sanitizer check
 cover packed projections. Both NVLink quads were complete NV2. A larger paired
 prefill schedule exceeded VRAM at the unchanged context and was removed; direct
 small-row Tensor Core and unpack-plus-cuBLAS alternatives lost to packed GEMV.
+Coarser FP8 partial reductions helped isolated projections but slowed complete
+speculative cycles and were removed.
 The initial generic Triton attention path exhausted VRAM during autotuning;
 there is no completed stock-attention throughput baseline.
 

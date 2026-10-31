@@ -123,11 +123,16 @@ class TestSM70NVFP4PrefillGather(CustomTestCase):
         self._check_live_routes_and_unaligned_inputs(256, 64)
 
     def test_tp8_shards(self):
-        for n, k in ((512, 4096), (4096, 256)):
+        for n, k, top_k in (
+            (512, 4096, 8),
+            (4096, 256, 8),
+            (768, 6144, 4),
+            (6144, 384, 4),
+        ):
             with self.subTest(n=n, k=k):
-                self._check_live_routes_and_unaligned_inputs(n, k)
+                self._check_live_routes_and_unaligned_inputs(n, k, top_k)
 
-    def _check_live_routes_and_unaligned_inputs(self, n, k):
+    def _check_live_routes_and_unaligned_inputs(self, n, k, gate_top_k=8):
         """Cached rows must refresh on replay; wide loads must respect alignment.
 
         Rotating expert tails, negative expert IDs and a shrinking live count
@@ -179,7 +184,7 @@ class TestSM70NVFP4PrefillGather(CustomTestCase):
         weight = _dense_repack(packed)
         workspace = torch.zeros(320, dtype=torch.int32, device="cuda")
         counts = [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 175]
-        for top_k in (8, 1):
+        for top_k in (gate_top_k, 1):
             m = routes // top_k
             sorted_ids = torch.full(
                 (routes + experts * 64,), routes, dtype=torch.int32, device="cuda"
