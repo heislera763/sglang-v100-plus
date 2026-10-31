@@ -72,12 +72,12 @@ in software; it does not imply native arithmetic in those formats.
 | Operation | Implementation / contract |
 | --- | --- |
 | NVFP4 GEMMs | [marlin-v100](https://github.com/heislera763/marlin-v100) at `95b1e62e` plus local patches: W4A16, FP16 WMMA with FP32 accumulation; block/global scales remain distinct. TP4/TP8 routed prefill uses64×256×32 cached-row Marlin tiles. Small routed groups at both TP sizes use [Volta MMA](python/sglang/kernels/ops/gemm/sm70_nvfp4_routed.py) with M16 tiles and K-major decoded weights; FP16 dequantization/output and FP32 accumulation/scaling remain. Unused alternate-backend MoE scale buffers alias active scales, saving17.72GiB across GLM's8GPUs. |
-| FP8 GEMMs | W8A16 with block128 or MXFP8 group32 scales. [Small-row GEMV](python/sglang/kernels/ops/gemm/sm70_fp8_gemv.py) reuses reconstructed FP16 weights across1–4 rows and reduces K in FP32. Short-K projections fuse their finishing reduction; large four-row group32 projections decode four packed bytes together in native CUDA and retain scales across each group. [Prefill](python/sglang/kernels/ops/gemm/sm70_fp8_gemm.py) transiently unpacks one projection for native FP16 Tensor Cores/FP32 accumulation; no persistent FP16 weight bank. Intermediate row counts retain SM70 Marlin. Qwen block-FP8 experts retain their separate small-row kernels; EP4/EP8 preserves whole experts. |
+| FP8 GEMMs | W8A16 with block128 or MXFP8 group32 scales. [Small-row GEMV](python/sglang/kernels/ops/gemm/sm70_fp8_gemv.py) reuses reconstructed FP16 weights across1–8 rows and reduces K in FP32. Short-K projections fuse their finishing reduction; large group32 verification projections decode four packed bytes together in native CUDA and retain scales across each group. Five-to-eight-row batches use FP32 FMA; finite FP16 products are exact in FP32, preserving the accumulation result with fewer instructions. [Prefill](python/sglang/kernels/ops/gemm/sm70_fp8_gemm.py) transiently unpacks one projection for native FP16 Tensor Cores/FP32 accumulation; no persistent FP16 weight bank. Intermediate row counts retain SM70 Marlin. Qwen block-FP8 experts retain their separate small-row kernels; EP4/EP8 preserves whole experts. |
 | FP16 routed experts | [Volta MMA GEMM](python/sglang/kernels/ops/moe/sm70_fp16.py), retained for the original NVIDIA checkpoint's unquantized MTP experts. FP16 inputs/weights/output, FP32 accumulation and router multiply; upstream routing, activation and expert sum retained. Automatically selected by the SM70 plugin; unsupported epilogues fail under strict dispatch. |
 | Qwen QSA/GDN/HC | Direct FP16-cache sparse prefill/decode/verification, masked Tensor Core prefill, SM70 GDN and gated-residual kernels; HC eager prefill partitions within each quad, including TP8. |
 | GLM attention | [Canonical V100 CUDA backend](python/sglang/kernels/ops/attention/v100.py) from the [FA fork](https://github.com/heislera763/flash-attention-v100): selected-key FP16 sparse prefill/decode/MTP, FP32 reductions and FP16 probabilities/partials. Empty tiles skip identity work. The model-native FP8 indexer uses [live-history MMA decode scoring](python/sglang/kernels/ops/attention/dsa/sm70_indexer_decode.py) and [fused shared-history prefill scoring](python/sglang/kernels/ops/attention/dsa/sm70_indexer_prefill.py). Prefill keeps ReLU/head weighting/reduction on-chip, converts the shared index bank once per chunk and reuses64-key tiles across query pairs with24KiB shared scratch; no global per-head score tensor. Whole-chunk query selection is shared within existing DCP4 quads; only final selected IDs are exchanged. Decode/verification gathers initialize only live counted prefixes; future scratch is masked by the scorer. |
 | GLM KDA / mHC | Native CUDA full-K FP32 recurrence, FP16 state and per-step verification carry. KDA prefill prepares normalized Q/K and gates once; a Tensor Core chunk formulation is future work. Paired prefill uses exact fused full-row mHC preparation and avoids the local gathers; other profiles retain quad partitions. Its learned FP32 projection stays replicated to preserve reduction order. |
-| MiniMax M3.1 | [Volta Tensor Core index/sparse attention](python/sglang/kernels/ops/attention/minimax_sparse/sm70.py), original selected128-token blocks, FP16 main/index KV and FP32 online/split-K reductions. FP16 Gemma QK norm/partial RoPE, FP32 biased top4 routing, original SwiGLU-OAI/clamps. NVFP4 encoding divisors are inverted once at load; MXFP8 groups stay32. Small routed GEMMs reuse the M16/K-major SM70 kernel and full-K FP32 reduction. Vision retains FP16 SDPA. |
+| MiniMax M3.1 | [Volta Tensor Core index/sparse attention](python/sglang/kernels/ops/attention/minimax_sparse/sm70.py), original selected128-token blocks, FP16 main/index KV and FP32 online/split-K reductions. FP16 Gemma QK norm/partial RoPE, FP32 biased top4 routing, original SwiGLU-OAI/clamps. NVFP4 encoding divisors are inverted once at load; MXFP8 groups stay32. Small routed GEMMs reuse the M16/K-major SM70 kernel and full-K FP32 reduction. Vision retains FP16 SDPA. [Quad collectives](v100_plus/sglang_v100_plus/quad_collectives.py) retain TP8 computation, use NVLink inside each quad and stripe bulk/verification sums over three fast PCIe bridges; tiny sums and gathers share the existing global NCCL communicator. |
 | Storage | Unquantized FP16 attention KV for both models; Qwen FP16 QSA index, GLM's separate model-native FP8 indexer. KV-cache quantization is excluded from the project recipes. FP16 recurrent state is retained. |
 | Cold module loading | Return idle Torch allocator blocks to CUDA when first-use Triton loads have little headroom; leave live tensors unchanged. Skip capture/custom arenas; steady kernel replay has no callback. |
 | Vision / DFlash2 | GLM uses native FP16 D64 varlen vision attention; Qwen retains SDPA vision. [DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2/tree/bf582e4eacc1810f76656d1811693ff6c6737d2a) uses FP16 draft linears/KV and FP32 convolution/residual/norm for range safety. Its TP8/block8 draft uses native SM70 local GQA with FP32 split-K reduction; replicated draft storage stays outside target DCP. Eight-row target projections reuse packed FP8 weights. The Triton draft-backend option supplies metadata/cache management; arithmetic dispatches to native FA. Own MTP3 remains faster in the current screen. |
@@ -238,29 +238,36 @@ cache flushed per request, profiling excluded. These are preliminary local rates
 
 | Category | Prefill tokens/s | Generation tokens/s | Draft acceptance |
 | --- | ---: | ---: | ---: |
-| Coding | 814 | 51.4 | 35.7% |
-| Writing | 830 | 43.7 | 27.1% |
-| Document analysis | 827 | 40.9 | 24.7% |
-| Mean | 824 | 45.4 | 29.2% |
+| Coding | 1483 | 75.3 | 50.4% |
+| Writing | 1548 | 53.2 | 30.7% |
+| Document analysis | 1545 | 50.2 | 27.1% |
+| Mean | 1525 | 59.6 | 36.0% |
 
-The matched non-speculative expert A/B improved generation 22.1→36.8 tokens/s
-with prefill unchanged at 825. DSpark graph capture then improved its eager draft
-39.0→45.4 tokens/s with identical accepted lengths and generated text. Images,
-tool calls, T1/P.95 sampling and prefix reuse pass. Kernel FP64 references,
-dynamic graph replay/canaries and Compute Sanitizer pass without relaxed bounds.
-The final build completed 10208 input+30 output tokens at the 10K boundary
-(SGLang reserves two admission positions), followed by image/tool/cache reuse.
+The compatible [3b8321aa1 baseline](https://github.com/heislera763/sglang-v100-plus/commit/3b8321aa1)
+averaged 824 prefill/45.4 generation tokens/s: **+85%/+31%** with the same weights, caches and
+sampling. NVLink distribution through three healthy PCIe endpoints avoids the
+Gen1x8 uplink without excluding its GPU from compute. Four-CTA subgroup
+communicators bound VRAM; eager gathers reuse the graph communicator. Reordered
+FP16 sums change greedy sequences and acceptance, so the full generation gain
+includes that effect. The subsequent FP8 FMA, packed-feature and communicator reuse changes add 4.3%
+generation versus transport alone, with all three messages and acceptance values
+identical. No persistent expanded weight bank is added.
+
+Images, tool calls, T1/P.95 sampling, 8064-token prefix reuse and 10208 input+30 output
+at the 10K boundary pass without retractions; SGLang reserves two admission slots.
+FP64 kernel references, changing-input graph replay/canaries and sanitizer checks
+cover packed projections. Both NVLink quads were complete NV2. A larger paired
+prefill schedule exceeded VRAM at the unchanged context and was removed; direct
+small-row Tensor Core and unpack-plus-cuBLAS alternatives lost to packed GEMV.
 The initial generic Triton attention path exhausted VRAM during autotuning;
-there is no completed stock-attention throughput baseline. Both NVLink quads
-were complete NV2, but one PCIe uplink remained Gen1x8 under load. Prefill's
-profile is dominated by cross-quad collectives; forced NCCL protocol trials lost.
+there is no completed stock-attention throughput baseline.
 
-Separate near3K/256-output DFlash screens (context4K, same three categories):
+Historical pre-transport near3K/256-output DFlash screens (context4K, same three categories):
 Inco averaged 831 prefill/43.7 generation tokens/s with 26.0% acceptance and passed
 the same image/tool/sampling/reuse checks. Radix averaged 834/15.8 with 0.6%
 acceptance; changing only its resolved draft causality did not repair it.
 DSpark at 10K averaged 829/46.0 on these same short prompts.
-These are different prompt/capacity settings from the DSpark table above;
+These predate the transport update and use different prompt/capacity settings;
 Radix's loadability is not a claim of working speculation.
 
 Upstream integration screen (2026-10-28), same near8K/256-output profile below:

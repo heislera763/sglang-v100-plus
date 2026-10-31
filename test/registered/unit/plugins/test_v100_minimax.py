@@ -17,10 +17,39 @@ register_cpu_ci(est_time=3, suite="base-a-test-cpu")
 with patch.object(
     sys, "path", [str(Path(__file__).resolve().parents[4] / "v100_plus"), *sys.path]
 ):
-    from sglang_v100_plus import minimax
+    from sglang_v100_plus import minimax, quad_collectives
 
 
 class TestMiniMaxSM70Adapters(CustomTestCase):
+    def test_quad_stripes_partition_unaligned_messages(self):
+        """Remainders must neither disappear nor acquire a second writer."""
+        for count in (32768, 49152, 49153, 49167, 6291456):
+            with self.subTest(count=count):
+                owners = torch.zeros(count, dtype=torch.int8)
+                for slot in range(3):
+                    start, stop = quad_collectives.stripe_bounds(count, slot)
+                    self.assertEqual(start % 16, 0)
+                    owners[start:stop] += 1
+                self.assertTrue(bool((owners == 1).all()))
+
+    def test_bridges_follow_links_instead_of_physical_device_numbers(self):
+        """A slow endpoint still computes but cannot bottleneck a PCIe stripe."""
+        records = [
+            dict(
+                bus=f"gpu-{r}",
+                peers={f"gpu-{p}" for p in range(r // 4 * 4, r // 4 * 4 + 4)},
+                pcie_bw=7880,
+            )
+            for r in range(8)
+        ]
+        records[2]["pcie_bw"] = 2000
+        records[7]["pcie_bw"] = 2000
+        plan = quad_collectives.bridge_plan(records)
+        self.assertEqual({r for pair in plan for r in pair}, {0, 1, 3, 4, 5, 6})
+        records[0]["peers"].remove("gpu-3")
+        with self.assertRaisesRegex(ValueError, "complete NVLink"):
+            quad_collectives.bridge_plan(records)
+
     def test_rope_trimming_leaves_other_dflash_models_unchanged(self):
         config = SimpleNamespace(
             hidden_size=4096,

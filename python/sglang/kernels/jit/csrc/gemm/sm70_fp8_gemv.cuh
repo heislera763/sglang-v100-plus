@@ -16,6 +16,17 @@ static_assert(SGL_CUDA_ARCH == 700, "Packed FP8 vector GEMV requires SM70");
 
 namespace fp8_gemv {
 
+template <bool Fused>
+__device__ __forceinline__ float accumulate(float value, float weight, float sum) {
+  // Wider verification blocks are arithmetic limited. Both multiplicands are
+  // FP16 values, so their product is exact in FP32; FMA saves an instruction.
+  // Keep the qualified <=4-row reduction order unchanged.
+  if constexpr (Fused)
+    return __fmaf_rn(value, weight, sum);
+  else
+    return __fadd_rn(sum, __fmul_rn(value, weight));
+}
+
 template <bool Aligned>
 __device__ __forceinline__ half2 load_scale_pair(const half* p) {
   if constexpr (Aligned)
@@ -69,10 +80,10 @@ __global__ void vector_partial(
 #pragma unroll
       for (int row = 0; row < Rows; ++row) {
         const float value = kk < k ? __half2float(x[row * k + kk]) : 0.0f;
-        accum[row][0] = __fadd_rn(accum[row][0], __fmul_rn(value, f01.x));
-        accum[row][1] = __fadd_rn(accum[row][1], __fmul_rn(value, f01.y));
-        accum[row][2] = __fadd_rn(accum[row][2], __fmul_rn(value, f23.x));
-        accum[row][3] = __fadd_rn(accum[row][3], __fmul_rn(value, f23.y));
+        accum[row][0] = accumulate<(Rows >= 5 && Group == 32)>(value, f01.x, accum[row][0]);
+        accum[row][1] = accumulate<(Rows >= 5 && Group == 32)>(value, f01.y, accum[row][1]);
+        accum[row][2] = accumulate<(Rows >= 5 && Group == 32)>(value, f23.x, accum[row][2]);
+        accum[row][3] = accumulate<(Rows >= 5 && Group == 32)>(value, f23.y, accum[row][3]);
       }
     }
   }

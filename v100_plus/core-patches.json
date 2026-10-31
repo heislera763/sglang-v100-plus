@@ -9,7 +9,7 @@
     "python/sglang/kernels/ops/attention/dsa/triton_sparse_mla_decode.py": "Preserve FP16 output and shared SM70 small-row geometry while using upstream consolidated fused/split-K kernels.",
     "python/sglang/kernels/ops/gemm/__init__.py": "Register Volta packed-FP8 and encoded-NVFP4 GEMV and small-row routed MMA implementations.",
     "python/sglang/kernels/ops/gemm/sm70_nvfp4_gemv.py": "FP32-accumulating NVFP4 GEMV over native SM70 Marlin packed weights/scales, with device-counted masked routing and caller-selected inactive-output preservation/clearing.",
-    "python/sglang/kernels/jit/csrc/gemm/sm70_fp8_gemv.cuh": "SM70 packed-word FP8 GEMV through eight verification rows with scale reuse, FP16 reconstructed operands and FP32 partial sums; lazy JIT helper for the registered GEMM operator.",
+    "python/sglang/kernels/jit/csrc/gemm/sm70_fp8_gemv.cuh": "SM70 packed-word FP8 GEMV through eight verification rows with scale reuse, FP16 reconstructed operands and FP32 partial sums. Five-to-eight-row group32 projections use FP32 FMA; earlier <=4-row arithmetic is preserved.",
     "python/sglang/kernels/ops/layernorm/__init__.py": "Register SM70 full/sharded fused mHC with lazy JIT preparation and bulk token-shard operators.",
     "python/sglang/kernels/ops/layernorm/mhc_post_split_h.py": "Select the SM70-compatible FP16/FP32 mHC post-combine path.",
     "python/sglang/kernels/ops/layernorm/mhc_sm70.py": "Volta mHC projection/RMS and pointwise implementations; share exact bulk cast/squared-mean preparation between full-row and owned-shard paths, preserving the FP32 projection/reduction order and bounded zero-padded shard outputs.",
@@ -64,11 +64,12 @@
     "python/sglang/kernels/ops/attention/minimax_qknorm_rope.py": "Select the matching FP16/BF16 JIT specialization for MiniMax grouped QK normalization/RoPE.",
     "python/sglang/kernels/ops/attention/minimax_sparse/sm70.py": "Volta Tensor Core FP16 block-max index scoring, selected 128-token-block GQA with FP32 online/split-K reductions, and bounded draft windows preserving resolved causality; no KV quantization.",
     "python/sglang/srt/arg_groups/model_overrides/minimax_m3.py": "Allow MiniMax NVFP4 and native DSpark/DFlash on SM70 with Marlin, Triton metadata, static verification and compute-dtype draft KV.",
-    "python/sglang/srt/models/minimax_m3.py": "Keep FP16 MiniMax on the FP32 router path instead of the BF16-only specialization.",
+    "python/sglang/srt/models/minimax_m3.py": "Keep FP16 MiniMax on the FP32 router path instead of the BF16-only specialization. Use the upstream packed auxiliary collector to avoid list-clone/concatenation duplication for DSpark/DFlash.",
     "python/sglang/srt/models/minimax_vl_common.py": "Accept FP16 vision inputs in addition to BF16 for MiniMax Volta execution.",
     "python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py": "Use the shared draft-graph memory policy so the SM70 adapter can qualify bounded single-request graphs below the default 1GiB heuristic.",
     "python/sglang/srt/speculative/draft_worker_common.py": "Expose the conservative draft CUDA-graph memory heuristic as a shared hook point; actual graph allocation failures remain explicit.",
     "python/sglang/srt/speculative/dflash_worker_v2.py": "Use the shared draft-graph memory policy for qualified single-request MiniMax drafts.",
-    "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation."
+    "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation.",
+    "python/sglang/srt/distributed/device_communicators/pynccl.py": "Allow a per-communicator NCCL max-CTA bound, retaining default behavior. MiniMax quad/bridge communicators use four channels to bound their VRAM overhead."
   }
 }

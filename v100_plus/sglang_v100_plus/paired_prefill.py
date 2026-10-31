@@ -24,6 +24,8 @@ from sglang.srt.runtime_context import (
     mamba_cache_chunk_size,
 )
 
+from .quad_collectives import all_reduce as quad_all_reduce
+
 
 def _slot():
     return get_buffer(
@@ -287,13 +289,13 @@ def all_reduce(original, group, x):
         return original(group, x)
     scheduler = _slot().get()
     if scheduler is None or group.world_size != 8 or not x.is_cuda:
-        return original(group, x)
+        return quad_all_reduce(original, group, x)
     compute = torch.cuda.current_stream()
     ready = torch.cuda.Event()
     ready.record()
     with torch.cuda.stream(scheduler.comm):
         scheduler.comm.wait_event(ready)
-        result = original(group, x)
+        result = quad_all_reduce(original, group, x)
         x.record_stream(scheduler.comm)
         done = torch.cuda.Event()
         done.record()

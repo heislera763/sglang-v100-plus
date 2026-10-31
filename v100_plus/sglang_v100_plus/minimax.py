@@ -28,7 +28,10 @@ def draft_graph_memory(original, available_mem_gb, *, draft_model, num_tokens_pe
 
 
 def sparse_backend_init(original, self, runner):
+    from .quad_collectives import initialize
+
     result = original(self, runner)
+    initialize(runner)
     logger.info(
         "MiniMax SM70 uses FP16 Tensor Core index/sparse attention, FP32 "
         "reductions and FP16 main/index KV; Triton supplies metadata/top-k."
@@ -388,11 +391,17 @@ def prepare_experts(original, method, layer):
 
 
 def install_hooks(hooks, hook_type):
+    from .quad_collectives import all_gather
     from .quantization import minimum_capability
 
     base = "sglang.srt.layers.quantization.minimax_m3_nvfp4."
     hooks.extend(
         [
+            (
+                "sglang.srt.distributed.parallel_state.GroupCoordinator._all_gather_into_tensor",
+                all_gather,
+                hook_type.AROUND,
+            ),
             (
                 "sglang.srt.speculative.draft_worker_common.draft_graph_has_memory",
                 draft_graph_memory,

@@ -41,7 +41,7 @@ from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.aux_hidden_states import (
     AuxHiddenStateAccumulator,
-    AuxHiddenStateList,
+    AuxHiddenStatePacker,
 )
 from sglang.srt.layers.dp_attention import (
     is_dp_attention_enabled,
@@ -1911,7 +1911,7 @@ class MiniMaxM3Model(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
-    ) -> Union[torch.Tensor, PPProxyTensors, Tuple[torch.Tensor, list[torch.Tensor]]]:
+    ) -> Union[torch.Tensor, PPProxyTensors, Tuple[torch.Tensor, torch.Tensor]]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 embeds = self.get_input_embeddings()
@@ -1925,7 +1925,9 @@ class MiniMaxM3Model(nn.Module):
                 pp_proxy_tensors, forward_batch
             )
 
-        aux_hidden_states = AuxHiddenStateList()
+        aux_hidden_states = AuxHiddenStatePacker.for_batch(
+            forward_batch, len(self.layers_to_capture)
+        )
         if forward_batch.can_run_tbo:
             hidden_states = model_forward_stages(
                 layers=self.layers,
@@ -1972,7 +1974,7 @@ class MiniMaxM3Model(nn.Module):
 
         if len(aux_hidden_states) == 0:
             return hidden_states
-        return hidden_states, aux_hidden_states
+        return hidden_states, aux_hidden_states.finalize()
 
 
 class MiniMaxM3SparseForCausalLM(nn.Module):
