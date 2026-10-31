@@ -22,6 +22,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def draft_graph_has_memory(
+    available_mem_gb: float, *, draft_model: torch.nn.Module, num_tokens_per_req: int
+) -> bool:
+    """Conservative default for large draft graphs; adapters may qualify a shape.
+
+    This is a startup heuristic, not an allocation guarantee. Actual capture
+    still raises on OOM, including when an adapter permits a smaller budget.
+    """
+    return available_mem_gb >= 1.0
+
+
 class DraftWorkerBundle(msgspec.Struct, frozen=True):
     draft_worker: TpModelWorker
     draft_model_runner: ModelRunner

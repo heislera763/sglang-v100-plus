@@ -35,7 +35,9 @@ NVFP4 = SimpleNamespace(
 @pytest.fixture(autouse=True)
 def blackwell_static_verify(monkeypatch):
     monkeypatch.setenv("SGLANG_RAGGED_VERIFY_MODE", "static")
-    with override_platform(is_blackwell=True, is_xpu=False, is_hip=False):
+    with override_platform(
+        device_sm=100, is_blackwell=True, is_xpu=False, is_hip=False
+    ):
         yield
 
 
@@ -158,7 +160,7 @@ def test_dflash_hicache_restores_draft_kv_through_a_sidecar():
 
 def test_dflash_requires_blackwell_and_static_verification(monkeypatch):
     with (
-        override_platform(is_blackwell=False),
+        override_platform(device_sm=90, is_blackwell=False),
         pytest.raises(ValueError, match="Blackwell"),
     ):
         _minimax_m3_overrides(_args(), NVFP4)

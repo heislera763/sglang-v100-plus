@@ -352,6 +352,21 @@ def moe_wna16_marlin_gemm(
                     and top_k == 1
                     and (size_n, size_k) in ((4096, 256), (4096, 512))
                 )
+                or (
+                    b_q_weight.shape[0] == 128
+                    and (
+                        (
+                            1 <= size_m <= 8
+                            and top_k == 4
+                            and (size_n, size_k) == (768, 6144)
+                        )
+                        or (
+                            size_m in (4, 8, 12, 16, 20, 24, 28, 32)
+                            and top_k == 1
+                            and (size_n, size_k) == (6144, 384)
+                        )
+                    )
+                )
             )
             and a.dtype == torch.float16
             and b_scales.dtype == torch.float8_e4m3fn
@@ -369,7 +384,7 @@ def moe_wna16_marlin_gemm(
                 sm70_nvfp4_routed_gemm,
             )
 
-            # TP4/TP8 small expert groups share M16 and K-major decoded weights;
+            # GLM and MiniMax small expert groups share M16/K-major weights;
             # keep the existing activation, expert sum and Half boundaries.
             # use_atomic_add permits split-K, not accumulation into prior C;
             # this implementation owns the full K reduction and overwrites C.

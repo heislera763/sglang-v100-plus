@@ -139,15 +139,15 @@ def _dense_repack(weight, num_bits=4):
     torch.ops.load_library(str(libraries[0]))
     e, n, packed_k = weight.shape
     k = packed_k * (8 // num_bits)
-    inputs = weight.contiguous().view(torch.int32).transpose(1, 2).contiguous()
     perm = torch.empty(0, device=weight.device, dtype=torch.int32)
     result = torch.empty(
         (e, k // 16, n * (num_bits // 2)), device=weight.device, dtype=torch.int32
     )
     for i in range(e):
-        result[i] = torch.ops._C.gptq_marlin_repack(
-            inputs[i], perm, k, n, num_bits, False
-        )
+        # Repack one expert at a time. Transposing the entire expert bank
+        # duplicated hundreds of MiB while the whole checkpoint was resident.
+        inputs = weight[i].contiguous().view(torch.int32).T.contiguous()
+        result[i] = torch.ops._C.gptq_marlin_repack(inputs, perm, k, n, num_bits, False)
     return result
 
 

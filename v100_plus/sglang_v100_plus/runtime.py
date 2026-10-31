@@ -44,6 +44,7 @@ def install():
         create_fp8_moe_runner,
         fp8_marlin_scalar_type,
         fp8_minimum_capability,
+        fp8_quant_method,
         fp8_route_block_size,
         mixed_quant_method,
         prepare_fp8_dense,
@@ -232,6 +233,11 @@ def install():
             HookType.AROUND,
         ),
         (
+            "sglang.srt.layers.quantization.fp8.Fp8Config.get_quant_method",
+            fp8_quant_method,
+            HookType.AROUND,
+        ),
+        (
             "sglang.srt.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading",
             prepare_fp8_dense,
             HookType.AROUND,
@@ -411,6 +417,11 @@ def install():
             HookType.AROUND,
         ),
     ]
+    from .minimax import install_attention_hooks as install_minimax_attention
+    from .minimax import install_hooks as install_minimax_hooks
+
+    install_minimax_hooks(hooks, HookType)
+    install_minimax_attention(hooks, HookType)
     from .paired_prefill import all_reduce as paired_all_reduce
     from .paired_prefill import model_forward as paired_model_forward
     from .prefill import model_forward, prepare_attention
@@ -826,15 +837,14 @@ def route_top10(original, scores, bias, topk, *args, **kwargs):
         scores.is_cuda
         and scores.dtype in (torch.float16, torch.float32)
         and scores.ndim == 2
-        and scores.shape[1] == 288
-        and topk == 8
+        and (scores.shape[1], topk) in ((288, 8), (128, 4))
         and bias is not None
-        and bias.shape == (288,)
+        and bias.shape == (scores.shape[1],)
         and bias.device == scores.device
         and bias.dtype in (torch.float16, torch.float32)
         and torch.cuda.get_device_capability(scores.device) == (7, 0)
     ):
-        # GLM's biased top-8 is the mainline FP32 Triton router on SM70.
+        # GLM top-8 and MiniMax top-4 use the FP32 Triton biased router.
         # Its SM100-only radix branch cannot activate on this device.
         return original(scores, bias, topk, *args, **kwargs)
     reject_fallback(

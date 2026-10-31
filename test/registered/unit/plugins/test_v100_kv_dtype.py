@@ -21,6 +21,29 @@ with patch.object(
 
 
 class TestV100KVCacheDtype(CustomTestCase):
+    def test_minimax_target_and_native_draft_use_compute_dtype_cache(self):
+        for architecture in (
+            "MiniMaxM3SparseForConditionalGeneration",
+            "DSparkMiniMaxDraftModel",
+        ):
+            model = SimpleNamespace(
+                config=SimpleNamespace(architectures=[architecture]),
+                quant_config=SimpleNamespace(kv_cache_quant_algo="FP8"),
+            )
+            args = dict(
+                model=model,
+                server_args_kv_cache_dtype="auto",
+                model_dtype=torch.float16,
+                is_draft_worker=architecture.startswith("DSpark"),
+                is_dflash=True,
+                speculative_draft_attention_backend="triton",
+            )
+            self.assertEqual(
+                sm70_glm_kv_cache_dtype(configure_kv_cache_dtype, **args),
+                ("auto", torch.float16),
+            )
+            self.assertEqual(model.quant_config.kv_cache_quant_algo, "FP8")
+
     def test_auto_fp8_recipe_keeps_glm_fp16_without_mutating_weights(self):
         for model_type in ("glm5_next", "glm5_next_text"):
             for draft in (False, True):

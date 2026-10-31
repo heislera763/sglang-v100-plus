@@ -37,8 +37,8 @@ _MAX_GROUPS = 4
 
 
 @cache_once
-def _jit_module(pos_dtype, head_dim, rope_dim) -> Module:
-    args = make_cpp_args(pos_dtype, head_dim, rope_dim, is_arch_support_pdl())
+def _jit_module(pos_dtype, head_dim, rope_dim, dtype=torch.bfloat16) -> Module:
+    args = make_cpp_args(dtype, pos_dtype, head_dim, rope_dim, is_arch_support_pdl())
     return load_jit(
         "fused_gemma_qknorm_rope",
         *args,
@@ -74,7 +74,7 @@ def _fused_gemma_qknorm_rope(
     # graph can trace past the otherwise-opaque FFI call. The launch is
     # graph-capturable (host-side constant offsets/counts), so it stays inside
     # the captured region.
-    module = _jit_module(positions.dtype, 128, 64)
+    module = _jit_module(positions.dtype, 128, 64, qkv.dtype)
     module.fused_gemma_qknorm_rope(
         qkv,
         w0,
@@ -120,7 +120,7 @@ def _fused_gemma_qknorm_rope_fp8(
     group_b: int,
     eps: float,
 ) -> None:
-    module = _jit_module(positions.dtype, 128, 64)
+    module = _jit_module(positions.dtype, 128, 64, qkv.dtype)
     module.fused_gemma_qknorm_rope_fp8(
         qkv,
         w0,

@@ -49,6 +49,9 @@ def sm70_runtime():
         (4096, 256, 0),
         (4096, 1024, 0),
         (2051, 1120, 1),
+        (1536, 6144, 0),  # MiniMax TP8 fused QKV/index
+        (3072, 6144, 0),  # MiniMax initial dense gate/up
+        (6144, 384, 0),  # MiniMax TP8 shared-expert down
     ],
 )
 def test_sm70_mxfp8_padded_dense_bias_and_graph(sm70_runtime, n, k, scale_offset):

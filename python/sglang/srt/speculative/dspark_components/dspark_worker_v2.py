@@ -589,7 +589,15 @@ class DSparkWorkerV2(BaseSpecWorker):
             group=self._draft_graph_group,
         )
         if is_cuda_alike() and capture_decode_cuda_graph:
-            if available_mem < 1.0:
+            from sglang.srt.speculative.draft_worker_common import (
+                draft_graph_has_memory,
+            )
+
+            if not draft_graph_has_memory(
+                available_mem,
+                draft_model=self.draft_model,
+                num_tokens_per_req=self.query_token_num,
+            ):
                 capture_decode_cuda_graph = False
                 logger.warning(
                     "Disable DSpark draft cuda graph because only %.2f GB GPU "

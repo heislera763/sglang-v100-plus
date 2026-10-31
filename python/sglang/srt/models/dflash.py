@@ -832,6 +832,9 @@ class DFlashDraftModel(nn.Module):
     supports_fused_context_kv = True
     # Layer prefixes and a quant_config-aware `fc`, for quantized checkpoints.
     supports_quantization = False
+    # Runtime adapters may shard the output columns without changing the
+    # checkpoint's logical context-feature projection or its Tensor interface.
+    context_projection_cls = nn.Linear
 
     def __init__(self, config, quant_config=None, prefix: str = "") -> None:
         super().__init__()
@@ -928,7 +931,7 @@ class DFlashDraftModel(nn.Module):
                 prefix=fc_prefix,
             )
         else:
-            self.fc = nn.Linear(
+            self.fc = self.context_projection_cls(
                 self.num_context_features * hidden_size, hidden_size, bias=False
             )
         self.hidden_norm = norm_cls(hidden_size, eps=rms_norm_eps)
@@ -1115,7 +1118,9 @@ class DFlashDraftModel(nn.Module):
                     continue
                 param = params_dict[resolved_name]
                 if resolved_name.endswith("fc.weight"):
-                    if self.is_nemotron_35_draft:
+                    if self.is_nemotron_35_draft or isinstance(
+                        self.fc, ColumnParallelLinear
+                    ):
                         expected_shape = (
                             int(self.config.hidden_size),
                             int(self.num_context_features * self.config.hidden_size),

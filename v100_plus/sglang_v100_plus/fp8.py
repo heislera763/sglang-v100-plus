@@ -54,6 +54,11 @@ class SM70MXFP8LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer):
         prepare_mxfp8_dense(self, layer)
 
+    def _process_mxfp8_linear_weight_scale(self, layer):
+        # MiniMax concatenates QKV/index projections before the loader's final
+        # processing pass. Its fused holder owns both packed weights and scales.
+        prepare_mxfp8_dense(self, layer)
+
     def apply(self, layer, x, bias=None):
         return apply_fp8_dense(None, self, layer, x, bias)
 
@@ -123,9 +128,23 @@ def prepare_mxfp8_dense(method, layer):
 
 
 def fp8_minimum_capability(original, config):
-    if config.use_mxfp8:
-        return original(config)
     return 70
+
+
+def fp8_quant_method(original, config, layer, prefix):
+    """Keep native MXFP8 draft projections in the same W8A16 layout."""
+    from sglang.srt.layers.linear import LinearBase
+    from sglang.srt.layers.quantization.utils import is_layer_skipped
+
+    if (
+        config.use_mxfp8
+        and isinstance(layer, LinearBase)
+        and not is_layer_skipped(
+            prefix, config.ignored_layers, fused_mapping=config.packed_modules_mapping
+        )
+    ):
+        return SM70MXFP8LinearMethod(config)
+    return original(config, layer, prefix)
 
 
 def prepare_fp8_dense(original, method, layer):

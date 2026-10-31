@@ -150,6 +150,27 @@ _GLM_BLAS_SHAPES = {
     (3072, 4096),  # DFlash2 TP8 fused QKV and gate/up projections
 }
 
+# MiniMax's unquantized vocabulary, draft projections and candidate heads.
+# cuBLAS is the selected FP16 backend; packed target projections use W8A16.
+_MINIMAX_BLAS_SHAPES = {
+    (25008, 6144),
+    (50016, 6144),
+    (1280, 6144),
+    (1536, 6144),
+    (2560, 6144),
+    (3072, 6144),
+    (6144, 1024),
+    (6144, 1536),
+    (6144, 2048),
+    (6144, 3072),
+    (768, 30720),
+    (768, 36864),
+    (1536, 30720),
+    (6144, 36864),
+    (256, 6144),
+    (6144, 6144),
+}
+
 
 def shape_supported(x, weight):
     return (
@@ -181,7 +202,11 @@ def blas_supported(x, weight, bias=None):
     ):
         return False
     if x.dtype == torch.float32:
-        return x.ndim == 2 and weight.shape == (32, 4096) and bias is None
+        return (
+            x.ndim == 2
+            and tuple(weight.shape) in ((32, 4096), (128, 6144))
+            and bias is None
+        )
     if x.ndim == 2:
         rows = x.shape[0]
         shape = tuple(weight.shape)
@@ -191,7 +216,9 @@ def blas_supported(x, weight, bias=None):
         )
         if native_small:
             return False
-        if shape in _GLM_BLAS_SHAPES and bias is None:
+        if (
+            shape in _GLM_BLAS_SHAPES or shape in _MINIMAX_BLAS_SHAPES
+        ) and bias is None:
             return True
         if rows in (2, 3, 4) and shape in ((1, 2560), (10240, 2560)):
             return True

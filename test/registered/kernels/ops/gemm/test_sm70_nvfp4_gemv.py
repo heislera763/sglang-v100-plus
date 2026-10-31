@@ -190,6 +190,10 @@ def test_checkpoint_reference_and_graph_replay(m, topk, n, k):
         (32, 1, 512, 4096, True),
         (24, 1, 4096, 256, True),
         (32, 1, 4096, 512, True),
+        (1, 4, 768, 6144, False),
+        (8, 4, 768, 6144, False),
+        (4, 1, 6144, 384, True),
+        (32, 1, 6144, 384, True),
     ],
 )
 def test_routed_mma_native_quant_reference_and_graph(m, topk, n, k, mul_router):

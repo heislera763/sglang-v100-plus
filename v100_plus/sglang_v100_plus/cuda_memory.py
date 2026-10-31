@@ -2,7 +2,7 @@
 
 import torch
 
-from sglang.srt.runtime_context import get_exec, get_schedule
+from sglang.srt.runtime_context import get_context, get_exec, get_schedule
 
 
 def require_single_session_capacity(original, configurator, token_capacity):
@@ -32,6 +32,8 @@ def reclaim_for_triton_load(_module, _function, _name, _metadata_group, _hash):
     # cuModuleLoadData allocates outside Torch. Its OOM cannot trigger the
     # caching allocator's usual retry/reclamation, even when live tensors fit.
     # This callback runs on first device-load, never on warmed kernel replay.
+    if not get_context().is_config_namespace_published("exec"):
+        return  # Direct kernel users have no serving allocator to reclaim.
     if get_exec().features.enable_memory_saver:
         return  # Custom allocation arenas have their own segment ownership.
     if torch.cuda.is_current_stream_capturing():

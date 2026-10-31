@@ -24,11 +24,12 @@ namespace sglang {
 // K/V + index K/V), here applied to GemmaRMSNorm + partial RoPE.
 constexpr int kMaxGroups = 4;
 
+template <typename DType>
 struct FusedGemmaQKNormParams {
-  bf16_t* __restrict__ qkv;
-  const bf16_t* __restrict__ weight[kMaxGroups];  // per-group norm weight [head_dim]
-  uint32_t group_offset[kMaxGroups];              // head offset of the group in the row
-  uint32_t group_count[kMaxGroups];               // number of heads in the group
+  DType* __restrict__ qkv;
+  const DType* __restrict__ weight[kMaxGroups];  // per-group norm weight [head_dim]
+  uint32_t group_offset[kMaxGroups];             // head offset of the group in the row
+  uint32_t group_count[kMaxGroups];              // number of heads in the group
   uint32_t num_groups;
   uint32_t total_heads;  // sum of group_count[0..num_groups)
   // Non-null for a group that also writes its output as fp8_e4m3,
@@ -42,11 +43,11 @@ struct FusedGemmaQKNormParams {
   float eps;
 };
 
-template <typename PosT, int64_t kHeadDim, int64_t kRopeDim, bool kUsePDL>
+template <typename DType, typename PosT, int64_t kHeadDim, int64_t kRopeDim, bool kUsePDL>
 struct FusedTrait {
   static_assert(kHeadDim == 128 && kRopeDim == 64, "kernel specialized for HEAD_DIM=128, ROTARY_DIM=64");
   static constexpr uint32_t kWorkerSize = device::kWarpThreads;  // full warp per head
-  SGL_DEVICE static void forward(const FusedGemmaQKNormParams& params) {
+  SGL_DEVICE static void forward(const FusedGemmaQKNormParams<DType>& params) {
     using namespace device;
     const auto tx = threadIdx.x;
     const auto bx = blockIdx.x;
@@ -78,26 +79,26 @@ struct FusedTrait {
     const auto idx_1 = lane_id + 32;  // rope second half [32, 64)
     const auto idx_2 = lane_id + 64;  // pass
     const auto idx_3 = lane_id + 96;  // pass
-    const auto w0_bf16 = weight[idx_0];
-    const auto w1_bf16 = weight[idx_1];
-    const auto w2_bf16 = weight[idx_2];
-    const auto w3_bf16 = weight[idx_3];
+    const auto w0_value = weight[idx_0];
+    const auto w1_value = weight[idx_1];
+    const auto w2_value = weight[idx_2];
+    const auto w3_value = weight[idx_3];
     const auto rope_idx = static_cast<const PosT*>(params.positions)[token_id];
     PDLWaitPrimary<kUsePDL>();
 
     // load input and compute RMS, fp32 accumulation for stability
-    const auto i0_bf16 = input[idx_0];
-    const auto i1_bf16 = input[idx_1];
-    const auto i2_bf16 = input[idx_2];
-    const auto i3_bf16 = input[idx_3];
-    const auto [i0, i1] = cast<fp32x2_t>(bf16x2_t{i0_bf16, i1_bf16});
-    const auto [i2, i3] = cast<fp32x2_t>(bf16x2_t{i2_bf16, i3_bf16});
+    const auto i0_value = input[idx_0];
+    const auto i1_value = input[idx_1];
+    const auto i2_value = input[idx_2];
+    const auto i3_value = input[idx_3];
+    const auto [i0, i1] = cast<fp32x2_t>(packed_t<DType>{i0_value, i1_value});
+    const auto [i2, i3] = cast<fp32x2_t>(packed_t<DType>{i2_value, i3_value});
     const auto ss = warp::reduce_sum(i0 * i0 + i1 * i1 + i2 * i2 + i3 * i3);
     const auto inv_rms = rsqrtf(ss / static_cast<float>(kHeadDim) + params.eps);
 
     // apply norm
-    const auto [w0, w1] = cast<fp32x2_t>(bf16x2_t{w0_bf16, w1_bf16});
-    const auto [w2, w3] = cast<fp32x2_t>(bf16x2_t{w2_bf16, w3_bf16});
+    const auto [w0, w1] = cast<fp32x2_t>(packed_t<DType>{w0_value, w1_value});
+    const auto [w2, w3] = cast<fp32x2_t>(packed_t<DType>{w2_value, w3_value});
     const auto n0 = i0 * inv_rms * (1.0f + w0);
     const auto n1 = i1 * inv_rms * (1.0f + w1);
     const auto n2 = i2 * inv_rms * (1.0f + w2);
@@ -111,35 +112,35 @@ struct FusedTrait {
     device::PDLTriggerSecondary<kUsePDL>();
     const auto o0 = n0 * cos - n1 * sin;
     const auto o1 = n1 * cos + n0 * sin;
-    const auto [o0_bf16, o1_bf16] = cast<bf16x2_t>(fp32x2_t{o0, o1});
-    const auto [o2_bf16, o3_bf16] = cast<bf16x2_t>(fp32x2_t{n2, n3});
-    input[idx_0] = o0_bf16;
-    input[idx_1] = o1_bf16;
-    input[idx_2] = o2_bf16;
-    input[idx_3] = o3_bf16;
+    const auto [o0_value, o1_value] = cast<packed_t<DType>>(fp32x2_t{o0, o1});
+    const auto [o2_value, o3_value] = cast<packed_t<DType>>(fp32x2_t{n2, n3});
+    input[idx_0] = o0_value;
+    input[idx_1] = o1_value;
+    input[idx_2] = o2_value;
+    input[idx_3] = o3_value;
 
-    // The FP8 value must equal `bf16_result.to(float8_e4m3fn)`, so it is cast
-    // from the rounded BF16 and not from the fp32 accumulator.
+    // The FP8 value must equal `rounded_result.to(float8_e4m3fn)`, so it is cast
+    // from the rounded FP16/BF16 and not from the fp32 accumulator.
     const auto fp8 = params.fp8_out[g];
     if (fp8 != nullptr) {
       const auto out = fp8 + token_id * params.fp8_token_stride[g] + local_head * kHeadDim;
-      out[idx_0] = cast<fp8_e4m3_t>(o0_bf16);
-      out[idx_1] = cast<fp8_e4m3_t>(o1_bf16);
-      out[idx_2] = cast<fp8_e4m3_t>(o2_bf16);
-      out[idx_3] = cast<fp8_e4m3_t>(o3_bf16);
+      out[idx_0] = cast<fp8_e4m3_t>(o0_value);
+      out[idx_1] = cast<fp8_e4m3_t>(o1_value);
+      out[idx_2] = cast<fp8_e4m3_t>(o2_value);
+      out[idx_3] = cast<fp8_e4m3_t>(o3_value);
     }
   }
 };
 
-template <typename Trait>
-__global__ void fused_gemma_qknorm_rope_kernel(const __grid_constant__ FusedGemmaQKNormParams params) {
+template <typename Trait, typename DType>
+__global__ void fused_gemma_qknorm_rope_kernel(const __grid_constant__ FusedGemmaQKNormParams<DType> params) {
   return Trait::forward(params);
 }
 
 // Multi-group fused GemmaRMSNorm + partial NeoX RoPE, in place over `qkv`.
 //
 // Up to kMaxGroups norm groups are passed as (weight, head offset, head count)
-// triples. `w0..w3` are the per-group norm weights ([head_dim] bf16 each); the
+// triples. `w0..w3` are the per-group norm weights ([head_dim] FP16/BF16 each); the
 // `offN` / `cntN` scalars give each group's head offset (within the per-token
 // row) and head count. These offsets/counts are host-known constants (passed as
 // scalars, never device tensors) so the launch stays CUDA-graph capturable.
@@ -149,7 +150,7 @@ __global__ void fused_gemma_qknorm_rope_kernel(const __grid_constant__ FusedGemm
 // index-V heads, lying outside every group, are left untouched.
 namespace details {
 
-template <typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
+template <typename DType, typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
 void qknorm_rope_impl(
     tvm::ffi::TensorView qkv,
     tvm::ffi::TensorView w0,
@@ -178,8 +179,8 @@ void qknorm_rope_impl(
   constexpr auto D = HEAD_DIM;
   constexpr auto R = ROTARY_DIM;
   device.set_options<kDLCUDA>();
-  TensorMatcher({N, -1}).with_dtype<bf16_t>().with_device(device).verify(qkv);
-  TensorMatcher({D}).with_dtype<bf16_t>().with_device(device).verify(w0).verify(w1).verify(w2).verify(w3);
+  TensorMatcher({N, -1}).with_dtype<DType>().with_device(device).verify(qkv);
+  TensorMatcher({D}).with_dtype<DType>().with_device(device).verify(w0).verify(w1).verify(w2).verify(w3);
   TensorMatcher({-1, R}).with_dtype<fp32_t>().with_device(device).verify(cos_sin_cache);
   TensorMatcher({N}).with_dtype<PosT>().with_device(device).verify(positions);
 
@@ -189,8 +190,8 @@ void qknorm_rope_impl(
   const int64_t offsets[kMaxGroups] = {off0, off1, off2, off3};
   const int64_t counts[kMaxGroups] = {cnt0, cnt1, cnt2, cnt3};
 
-  auto params = FusedGemmaQKNormParams{};
-  params.qkv = static_cast<bf16_t*>(qkv.data_ptr());
+  auto params = FusedGemmaQKNormParams<DType>{};
+  params.qkv = static_cast<DType*>(qkv.data_ptr());
   params.cos_sin_cache = static_cast<const float*>(cos_sin_cache.data_ptr());
   params.positions = positions.data_ptr();
   params.num_tokens = static_cast<uint32_t>(N.unwrap());
@@ -201,7 +202,7 @@ void qknorm_rope_impl(
   uint32_t total_heads = 0;
   for (int64_t i = 0; i < kMaxGroups; ++i) {
     const auto cnt = (i < num_groups) ? counts[i] : 0;
-    params.weight[i] = static_cast<const bf16_t*>(weights[i].data_ptr());
+    params.weight[i] = static_cast<const DType*>(weights[i].data_ptr());
     params.group_offset[i] = static_cast<uint32_t>(i < num_groups ? offsets[i] : 0);
     params.group_count[i] = static_cast<uint32_t>(cnt);
     total_heads += static_cast<uint32_t>(cnt);
@@ -226,20 +227,20 @@ void qknorm_rope_impl(
   bind_fp8(fp8_group_a, fp8_group_a_id);
   bind_fp8(fp8_group_b, fp8_group_b_id);
 
-  using Trait = FusedTrait<PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>;
+  using Trait = FusedTrait<DType, PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>;
   const auto needed_threads = static_cast<int64_t>(params.num_tokens) * total_heads * device::kWarpThreads;
   RuntimeCheck(needed_threads < std::numeric_limits<uint32_t>::max());
   if (needed_threads == 0) return;
   const uint32_t block_size = 256u;
   const uint32_t num_blocks = div_ceil(static_cast<uint32_t>(needed_threads), block_size);
   LaunchKernel(num_blocks, block_size, device.unwrap())  //
-      .enable_pdl(kUsePDL)(fused_gemma_qknorm_rope_kernel<Trait>, params);
+      .enable_pdl(kUsePDL)(fused_gemma_qknorm_rope_kernel<Trait, DType>, params);
 }
 
 }  // namespace details
 
 /// \brief Grouped GemmaRMSNorm + partial NeoX RoPE, in place over `qkv`.
-template <typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
+template <typename DType, typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
 void fused_gemma_qknorm_rope(
     tvm::ffi::TensorView qkv,
     tvm::ffi::TensorView w0,
@@ -258,7 +259,7 @@ void fused_gemma_qknorm_rope(
     int64_t cnt3,
     int64_t num_groups,
     double eps) {
-  details::qknorm_rope_impl<PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>(
+  details::qknorm_rope_impl<DType, PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>(
       qkv,
       w0,
       w1,
@@ -285,9 +286,9 @@ void fused_gemma_qknorm_rope(
 /// \brief As above, additionally emitting two groups as dense FP8 tensors.
 ///
 /// `fp8_a` / `fp8_b` are `[num_tokens, group_head_count, head_dim]` fp8_e4m3
-/// buffers for groups `group_a` / `group_b`, equal to the BF16 output cast to
-/// FP8. The BF16 write-back is kept.
-template <typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
+/// buffers for groups `group_a` / `group_b`, equal to the rounded output cast to
+/// FP8. The original-dtype write-back is kept.
+template <typename DType, typename PosT, int64_t HEAD_DIM, int64_t ROTARY_DIM, bool kUsePDL>
 void fused_gemma_qknorm_rope_fp8(
     tvm::ffi::TensorView qkv,
     tvm::ffi::TensorView w0,
@@ -310,7 +311,7 @@ void fused_gemma_qknorm_rope_fp8(
     int64_t group_a,
     int64_t group_b,
     double eps) {
-  details::qknorm_rope_impl<PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>(
+  details::qknorm_rope_impl<DType, PosT, HEAD_DIM, ROTARY_DIM, kUsePDL>(
       qkv,
       w0,
       w1,

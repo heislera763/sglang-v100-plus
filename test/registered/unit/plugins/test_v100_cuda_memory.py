@@ -8,7 +8,13 @@ from unittest.mock import patch
 
 from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
-from sglang.srt.runtime_context import get_context, get_parallel
+from sglang.srt.runtime_context import (
+    ParallelContext,
+    RuntimeContext,
+    get_context,
+    get_parallel,
+    use_context,
+)
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -58,6 +64,10 @@ class _Allocator:
 
 
 class TestV100ModuleMemory(CustomTestCase):
+    def test_direct_kernel_without_serving_context_needs_no_allocator_policy(self):
+        with use_context(RuntimeContext(parallel=ParallelContext())):
+            cuda_memory.reclaim_for_triton_load(None, None, "kernel", {}, "hash")
+
     def test_cold_module_fits_after_reclaim_without_changing_live_allocations(self):
         allocator = _Allocator()
         with self.assertRaisesRegex(RuntimeError, "out of memory"):
@@ -65,6 +75,7 @@ class TestV100ModuleMemory(CustomTestCase):
         live = allocator.allocated
         config = SimpleNamespace(features=SimpleNamespace(enable_memory_saver=False))
         with (
+            get_context().override_server_args(model_path="dummy"),
             patch.object(cuda_memory.torch, "cuda", allocator),
             patch.object(cuda_memory, "get_exec", return_value=config),
         ):
@@ -86,6 +97,7 @@ class TestV100ModuleMemory(CustomTestCase):
                 )
                 before = allocator.reserved, allocator.free
                 with (
+                    get_context().override_server_args(model_path="dummy"),
                     patch.object(cuda_memory.torch, "cuda", allocator),
                     patch.object(cuda_memory, "get_exec", return_value=config),
                 ):

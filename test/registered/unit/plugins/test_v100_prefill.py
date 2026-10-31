@@ -362,6 +362,26 @@ class TestV100Prefill(CustomTestCase):
         )
         torch.testing.assert_close(output, torch.ones_like(x), rtol=0, atol=0)
 
+    def test_dflash_preserves_minimax_gemma_one_plus_weight(self):
+        from sglang.srt.layers.layernorm import GemmaRMSNorm
+
+        original = GemmaRMSNorm(4, eps=1e-6)
+        original.weight = torch.nn.Parameter(
+            torch.tensor([0.0, 0.5, -0.5, 1.0], dtype=torch.float16)
+        )
+        norm = SM70DFlashResidualNorm(original)
+        x = torch.tensor([[1.0, -2.0, 3.0, 0.5]], dtype=torch.float16)
+        residual = x.float() * 0.75
+        summed = x.double() + residual.double()
+        expected = (
+            summed
+            * torch.rsqrt(summed.square().mean(-1, keepdim=True) + 1e-6)
+            * (1.0 + original.weight.double())
+        ).half()
+        actual, carry = norm(x, residual)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(carry, summed.float(), rtol=0, atol=0)
+
     def test_dflash_eager_entry_keeps_fp16_embedding_bits(self):
         embeddings = torch.tensor(
             [[1.0009765625, 1.0029296875, -1.0009765625]], dtype=torch.float16

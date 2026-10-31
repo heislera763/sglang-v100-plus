@@ -102,6 +102,30 @@ def packed_moe_hf(**quant_overrides):
 
 
 class TestMiniMaxM31ConfigResolution(CustomTestCase):
+    def test_sm70_keeps_fp16_cache_and_admits_native_drafts(self):
+        for algorithm in (None, "DSPARK", "DFLASH"):
+            with (
+                self.subTest(algorithm=algorithm),
+                override_platform(device_sm=70, is_blackwell=False),
+                patch.dict("os.environ", SGLANG_RAGGED_VERIFY_MODE="static"),
+            ):
+                args = server_args(
+                    speculative_algorithm=algorithm, disaggregation_mode="null"
+                )
+                overrides = _minimax_m3_overrides(args, packed_moe_hf())
+                self.assertEqual(overrides["attention_backend"], "triton")
+                self.assertEqual(overrides["moe_runner_backend"], "marlin")
+                self.assertEqual(overrides["page_size"], 128)
+                self.assertNotIn("kv_cache_dtype", overrides)
+                if algorithm is not None:
+                    self.assertEqual(
+                        overrides["speculative_draft_kv_cache_dtype"], "auto"
+                    )
+                if algorithm == "DSPARK":
+                    self.assertEqual(
+                        overrides["speculative_draft_attention_backend"], "triton"
+                    )
+
     def test_nvfp4_defaults_on_blackwell_and_portable_fallback(self):
         base = dict(quantization="minimax_m3_nvfp4", page_size=128)
         blackwell = base | dict(
@@ -131,7 +155,9 @@ class TestMiniMaxM31ConfigResolution(CustomTestCase):
         for is_blackwell, algorithm, expected in cases:
             with (
                 self.subTest(blackwell=is_blackwell, algorithm=algorithm),
-                override_platform(is_blackwell=is_blackwell),
+                override_platform(
+                    device_sm=100 if is_blackwell else 90, is_blackwell=is_blackwell
+                ),
                 patch.dict("os.environ", SGLANG_RAGGED_VERIFY_MODE="static"),
             ):
                 overrides = _minimax_m3_overrides(

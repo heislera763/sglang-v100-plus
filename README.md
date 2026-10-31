@@ -35,6 +35,9 @@ Pinned benchmark sources; sizes are weight-file totals, **not runtime VRAM**.
 | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/236dfdf285828023ca3bcd3f37366c58a3469b13) | `236dfdf28582` | Official 128×128 block FP8, BF16 exclusions; FP8 PLE/MTP experts | 172.78 GiB |
 | [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4/tree/da920bb0b9f4a06727223a349e55468e38352348) | `da920bb0b9f4` | ModelOpt abs-max NVFP4; main shared experts remain BF16; FP8 KV metadata | 190.40 GiB |
 | [nvidia/GLM-5.3-Flash-FP4-Local](https://huggingface.co/nvidia/GLM-5.3-Flash-FP4-Local/tree/76348ddb2be2e35e39ecfc00e75dc07703f4f3d5) | `76348ddb2be2` | QAD mixed precision: CSF32-compressed NVFP4 expert scales, MXFP8 projections, block-FP8 shared experts and quantized vision/MTP | 165.33 GiB |
+| [MiniMaxAI/MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash/tree/2f33a8b9ae49ce7b51c994df97166a7fd059bc2e) | `2f33a8b9ae49` | NVFP4 routed experts, group32 MXFP8 projections, BF16 exclusions; bundled dense MXFP8 DSpark | 232.94 GiB +2.14 GiB draft |
+| [RadixArk/Minimax-M3.1-Flash-Dflash2](https://huggingface.co/RadixArk/Minimax-M3.1-Flash-Dflash2/tree/923bf1d4b567d5ccb71b0488c6e61b5e4794e92a) | `923bf1d4b567` | BF16 DFlash2, Gemma norms, partial RoPE, 4096-token window | 3.83 GiB |
+| [incoai/MiniMax-M3.1-Flash-DFlash2](https://huggingface.co/incoai/MiniMax-M3.1-Flash-DFlash2/tree/ac07a7c1ecaae26a7ace595756124dca974b432d) | `ac07a7c1ecaa` | BF16 DFlash2, RMSNorm, full RoPE, 2048-token window | 3.96 GiB |
 
 FP4-Local is the current GLM target. It uses QAD mixed precision and needs its
 **own NVFP4 MTP**, not the FP8 draft exported from the original checkpoint.
@@ -74,6 +77,7 @@ in software; it does not imply native arithmetic in those formats.
 | Qwen QSA/GDN/HC | Direct FP16-cache sparse prefill/decode/verification, masked Tensor Core prefill, SM70 GDN and gated-residual kernels; HC eager prefill partitions within each quad, including TP8. |
 | GLM attention | [Canonical V100 CUDA backend](python/sglang/kernels/ops/attention/v100.py) from the [FA fork](https://github.com/heislera763/flash-attention-v100): selected-key FP16 sparse prefill/decode/MTP, FP32 reductions and FP16 probabilities/partials. Empty tiles skip identity work. The model-native FP8 indexer uses [live-history MMA decode scoring](python/sglang/kernels/ops/attention/dsa/sm70_indexer_decode.py) and [fused shared-history prefill scoring](python/sglang/kernels/ops/attention/dsa/sm70_indexer_prefill.py). Prefill keeps ReLU/head weighting/reduction on-chip, converts the shared index bank once per chunk and reuses64-key tiles across query pairs with24KiB shared scratch; no global per-head score tensor. Whole-chunk query selection is shared within existing DCP4 quads; only final selected IDs are exchanged. Decode/verification gathers initialize only live counted prefixes; future scratch is masked by the scorer. |
 | GLM KDA / mHC | Native CUDA full-K FP32 recurrence, FP16 state and per-step verification carry. KDA prefill prepares normalized Q/K and gates once; a Tensor Core chunk formulation is future work. Paired prefill uses exact fused full-row mHC preparation and avoids the local gathers; other profiles retain quad partitions. Its learned FP32 projection stays replicated to preserve reduction order. |
+| MiniMax M3.1 | [Volta Tensor Core index/sparse attention](python/sglang/kernels/ops/attention/minimax_sparse/sm70.py), original selected128-token blocks, FP16 main/index KV and FP32 online/split-K reductions. FP16 Gemma QK norm/partial RoPE, FP32 biased top4 routing, original SwiGLU-OAI/clamps. NVFP4 encoding divisors are inverted once at load; MXFP8 groups stay32. Small routed GEMMs reuse the M16/K-major SM70 kernel and full-K FP32 reduction. Vision retains FP16 SDPA. |
 | Storage | Unquantized FP16 attention KV for both models; Qwen FP16 QSA index, GLM's separate model-native FP8 indexer. KV-cache quantization is excluded from the project recipes. FP16 recurrent state is retained. |
 | Cold module loading | Return idle Torch allocator blocks to CUDA when first-use Triton loads have little headroom; leave live tensors unchanged. Skip capture/custom arenas; steady kernel replay has no callback. |
 | Vision / DFlash2 | GLM uses native FP16 D64 varlen vision attention; Qwen retains SDPA vision. [DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2/tree/bf582e4eacc1810f76656d1811693ff6c6737d2a) uses FP16 draft linears/KV and FP32 convolution/residual/norm for range safety. Its TP8/block8 draft uses native SM70 local GQA with FP32 split-K reduction; replicated draft storage stays outside target DCP. Eight-row target projections reuse packed FP8 weights. The Triton draft-backend option supplies metadata/cache management; arithmetic dispatches to native FA. Own MTP3 remains faster in the current screen. |
@@ -171,6 +175,46 @@ GLM draft path/quantization; PP2 additionally needs `SGLANG_ENABLE_PP_SPEC=1`.
 Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#api-usage),
 [Z.ai](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes).
 
+MiniMax M3.1, TP8/EP1 with bundled DSpark, images and FP16 main/index/draft KV:
+
+```bash
+export SGLANG_RAGGED_VERIFY_MODE=static SGLANG_VLM_CACHE_SIZE_MB=32
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+python -m sglang_v100_plus \
+  --model-path "$HOME/models/sglang/MiniMaxAI-MiniMax-M3.1-Flash" \
+  --served-model-name minimax-m3.1-flash --trust-remote-code --dtype float16 \
+  --host 127.0.0.1 --port 9003 --api-key test-only \
+  --tensor-parallel-size 8 --expert-parallel-size 1 \
+  --moe-runner-backend marlin --attention-backend triton --mm-attention-backend sdpa \
+  --kv-cache-dtype auto --page-size 128 --sampling-backend pytorch \
+  --context-length 10240 --max-total-tokens 10496 --max-running-requests 1 \
+  --mem-fraction-static 0.99 --chunked-prefill-size 1024 \
+  --disable-overlap-schedule --disable-prefill-cuda-graph \
+  --cuda-graph-backend-decode full --cuda-graph-bs-decode 1 \
+  --speculative-algorithm DSPARK --speculative-num-draft-tokens 8 \
+  --speculative-draft-model-path "$HOME/models/sglang/MiniMaxAI-MiniMax-M3.1-Flash/dspark" \
+  --speculative-draft-attention-backend triton \
+  --mm-process-config '{"image":{"device":"cpu"}}' \
+  --reasoning-parser auto --tool-call-parser auto --random-seed 531 \
+  --preferred-sampling-params '{"temperature":1.0,"top_p":0.95}'
+```
+
+MiniMax's Triton backend manages metadata; index scoring, sparse attention and
+draft windows use SM70 FP16 Tensor Cores with FP32 reductions. Vision's D80 heads
+use FP16 SDPA. DSpark proposes seven tokens in parallel, plus the anchor/target
+position; it is not seven sequential MTP steps. Its group32 MXFP8 weights remain
+packed. Bounded draft graphs use about 20MiB/rank and bypass the generic 1GiB free
+memory heuristic. Actual allocation failures remain explicit. Fixed-frequency
+RoPE tables are sized to the configured context without changing frequencies.
+The current FP16-cache qualification is **10K**, not the checkpoint's native 1M;
+60 full-KV layers and replicated TP8 KV heads make this model much tighter than GLM.
+For the qualified Inco DFlash2 alternative, use its pinned draft path,
+`--speculative-algorithm DFLASH`, and context4096/pool4352; keep the eight-position
+block and FP16 caches. Its unquantized weights load as FP16. The large context
+projection is column-sharded across TP ranks, saving 378MiB/rank without changing
+the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
+**unqualified** because acceptance collapses in the current FP16 integration.
+
 ## Settings and topology
 
 | Choice | Reason / limitation |
@@ -186,6 +230,38 @@ Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#a
 | Other switches | GLM metadata/sample graphs and alternate NVFP4 MoE GEMV remain off without a model-level benefit. Qwen metadata graphs retain their qualified PP2 use. Generic split-K/decode and attention/expert-topology trials that lost were removed. |
 
 ## Performance and validation
+
+MiniMax M3.1 screen (2026-10-31): TP8/EP1, bundled DSpark/8 verification positions,
+10K context, FP16 main/index/draft KV and vision, chunk1024, one request, strict
+dispatch. Three coherent near8K prompts, 32-token warmup and 256 T0/seed531 outputs;
+cache flushed per request, profiling excluded. These are preliminary local rates.
+
+| Category | Prefill tokens/s | Generation tokens/s | Draft acceptance |
+| --- | ---: | ---: | ---: |
+| Coding | 814 | 51.4 | 35.7% |
+| Writing | 830 | 43.7 | 27.1% |
+| Document analysis | 827 | 40.9 | 24.7% |
+| Mean | 824 | 45.4 | 29.2% |
+
+The matched non-speculative expert A/B improved generation 22.1→36.8 tokens/s
+with prefill unchanged at 825. DSpark graph capture then improved its eager draft
+39.0→45.4 tokens/s with identical accepted lengths and generated text. Images,
+tool calls, T1/P.95 sampling and prefix reuse pass. Kernel FP64 references,
+dynamic graph replay/canaries and Compute Sanitizer pass without relaxed bounds.
+The final build completed 10208 input+30 output tokens at the 10K boundary
+(SGLang reserves two admission positions), followed by image/tool/cache reuse.
+The initial generic Triton attention path exhausted VRAM during autotuning;
+there is no completed stock-attention throughput baseline. Both NVLink quads
+were complete NV2, but one PCIe uplink remained Gen1x8 under load. Prefill's
+profile is dominated by cross-quad collectives; forced NCCL protocol trials lost.
+
+Separate near3K/256-output DFlash screens (context4K, same three categories):
+Inco averaged 831 prefill/43.7 generation tokens/s with 26.0% acceptance and passed
+the same image/tool/sampling/reuse checks. Radix averaged 834/15.8 with 0.6%
+acceptance; changing only its resolved draft causality did not repair it.
+DSpark at 10K averaged 829/46.0 on these same short prompts.
+These are different prompt/capacity settings from the DSpark table above;
+Radix's loadability is not a claim of working speculation.
 
 Upstream integration screen (2026-10-28), same near8K/256-output profile below:
 

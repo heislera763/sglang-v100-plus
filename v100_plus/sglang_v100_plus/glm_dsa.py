@@ -52,14 +52,25 @@ def sm70_glm_kv_cache_dtype(original, **kwargs):
         if kwargs.get("is_draft_worker") and draft_dtype is not None
         else kwargs.get("server_args_kv_cache_dtype")
     )
+    minimax = bool(
+        set(getattr(getattr(model, "config", None), "architectures", ()) or ())
+        & {
+            "MiniMaxM3SparseForConditionalGeneration",
+            "MiniMaxM3SparseForCausalLM",
+            "DSparkMiniMaxDraftModel",
+        }
+    )
     if (
-        getattr(config, "model_type", None) in ("glm5_next", "glm5_next_text")
+        (
+            getattr(config, "model_type", None) in ("glm5_next", "glm5_next_text")
+            or minimax
+        )
         and kwargs.get("model_dtype") == torch.float16
         and effective == "auto"
         and str(getattr(quant, "kv_cache_quant_algo", "")).upper() == "FP8"
     ):
         logger.info(
-            "SM70 GLM auto KV uses FP16; checkpoint FP8 KV recipe requires "
+            "SM70 auto KV uses FP16; checkpoint FP8 KV recipe requires "
             "separate backend qualification. Weight quantization is unchanged."
         )
         return "auto", torch.float16

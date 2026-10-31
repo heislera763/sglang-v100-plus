@@ -706,7 +706,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
 
-        assert pixel_values.dtype == torch.bfloat16, "pixel_values must be bfloat16"
+        if pixel_values.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("MiniMax vision requires FP16 or BF16 pixel values")
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)

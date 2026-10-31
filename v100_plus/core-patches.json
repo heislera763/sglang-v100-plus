@@ -59,6 +59,16 @@
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer_prefill.py": "Dynamic-history Volta MMA prefill index scoring with fused FP32 head reduction/scaling; adjacent queries reuse one key tile and the same query/accumulator scratch, preserving24KiB shared memory.",
     "python/sglang/kernels/ops/attention/metadata.py": "Bound sparse top-k backscan loads for non-block-aligned selected widths.",
     "python/sglang/kernels/ops/attention/linear/fused_sigmoid_gating_recurrent.py": "Optional FP16 recurrent state rounding at each verification step.",
-    "python/sglang/kernels/ops/moe/zero_inactive_routes.py": "GPU-counted inactive-route clearing for native SM70 GEMMs; preserve omitted output rows and skip unused routing capacity under upstream sorted-prefix or scattered-expert contracts."
+    "python/sglang/kernels/ops/moe/zero_inactive_routes.py": "GPU-counted inactive-route clearing for native SM70 GEMMs; preserve omitted output rows and skip unused routing capacity under upstream sorted-prefix or scattered-expert contracts.",
+    "python/sglang/kernels/jit/csrc/minimax/fused_gemma_qknorm_rope.cuh": "Template MiniMax fused Gemma QK normalization/partial RoPE for FP16 as well as BF16, preserving FP32 arithmetic and the optional rounded FP8 epilogue.",
+    "python/sglang/kernels/ops/attention/minimax_qknorm_rope.py": "Select the matching FP16/BF16 JIT specialization for MiniMax grouped QK normalization/RoPE.",
+    "python/sglang/kernels/ops/attention/minimax_sparse/sm70.py": "Volta Tensor Core FP16 block-max index scoring, selected 128-token-block GQA with FP32 online/split-K reductions, and bounded draft windows preserving resolved causality; no KV quantization.",
+    "python/sglang/srt/arg_groups/model_overrides/minimax_m3.py": "Allow MiniMax NVFP4 and native DSpark/DFlash on SM70 with Marlin, Triton metadata, static verification and compute-dtype draft KV.",
+    "python/sglang/srt/models/minimax_m3.py": "Keep FP16 MiniMax on the FP32 router path instead of the BF16-only specialization.",
+    "python/sglang/srt/models/minimax_vl_common.py": "Accept FP16 vision inputs in addition to BF16 for MiniMax Volta execution.",
+    "python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py": "Use the shared draft-graph memory policy so the SM70 adapter can qualify bounded single-request graphs below the default 1GiB heuristic.",
+    "python/sglang/srt/speculative/draft_worker_common.py": "Expose the conservative draft CUDA-graph memory heuristic as a shared hook point; actual graph allocation failures remain explicit.",
+    "python/sglang/srt/speculative/dflash_worker_v2.py": "Use the shared draft-graph memory policy for qualified single-request MiniMax drafts.",
+    "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation."
   }
 }

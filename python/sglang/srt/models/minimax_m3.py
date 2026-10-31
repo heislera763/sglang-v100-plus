@@ -110,6 +110,7 @@ from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.runtime_context import (
     get_exec,
     get_forward,
+    get_model,
     get_parallel,
     get_platform,
     get_stream,
@@ -469,7 +470,12 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.bf16_router_gemm = envs.SGLANG_OPT_USE_BF16_ROUTER_GEMM.get()
+        # The BF16 specialization consumes hidden states without a cast. FP16
+        # models must keep the ordinary FP32 router, including its FP32 weights.
+        self.bf16_router_gemm = (
+            envs.SGLANG_OPT_USE_BF16_ROUTER_GEMM.get()
+            and get_model().dtype == torch.bfloat16
+        )
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_local_experts,

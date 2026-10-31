@@ -89,6 +89,21 @@ for _name in (
     )
 del _name
 
+for _name in (
+    "minimax_index_scores_sm70",
+    "minimax_sparse_attention_sm70",
+    "minimax_window_attention_sm70",
+):
+    register_kernel(
+        KernelSpec(
+            op=f"attention.{_name}",
+            backend=KernelBackend.JIT,
+            target=f"sglang.kernels.ops.attention.minimax_sparse.sm70:{_name}",
+            capabilities={CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))},
+        )
+    )
+del _name
+
 register_kernel(
     KernelSpec(
         op="attention.kda_qwen38_qsa_sm121",

@@ -54,6 +54,7 @@ def _minimax_m3_overrides(server_args: Any, hf_config: Any) -> dict:
         quant_resolved = quant_method
 
     if quant_resolved == "minimax_m3_nvfp4":
+        sm70 = get_platform().device_sm == 70
         if cfg.speculative_algorithm not in (None, "DSPARK", "DFLASH"):
             raise ValueError("M3.1 NVFP4 only supports DSPARK or DFLASH speculation")
         if cfg.speculative_algorithm in ("DSPARK", "DFLASH"):
@@ -64,7 +65,7 @@ def _minimax_m3_overrides(server_args: Any, hf_config: Any) -> dict:
                     f"M3.1 NVFP4 {algorithm} requires MiniMaxM3SparseForConditionalGeneration, "
                     f"got {hf_config.architectures[0]}"
                 )
-            if not get_platform().is_blackwell:
+            if not get_platform().is_blackwell and not sm70:
                 raise ValueError(f"M3.1 NVFP4 {algorithm} requires Blackwell")
             if envs.SGLANG_RAGGED_VERIFY_MODE.get() != "static":
                 raise ValueError(
@@ -77,13 +78,17 @@ def _minimax_m3_overrides(server_args: Any, hf_config: Any) -> dict:
                     "M3.1 NVFP4 DFLASH currently requires colocated serving"
                 )
             if cfg.speculative_draft_kv_cache_dtype in (None, "auto"):
-                overrides["speculative_draft_kv_cache_dtype"] = "bf16"
+                overrides["speculative_draft_kv_cache_dtype"] = (
+                    "auto" if sm70 else "bf16"
+                )
             # DFLASH resolves its backend against the draft's attention layout.
             if (
                 algorithm == "DSPARK"
                 and cfg.speculative_draft_attention_backend is None
             ):
-                overrides["speculative_draft_attention_backend"] = "trtllm_mha"
+                overrides["speculative_draft_attention_backend"] = (
+                    "triton" if sm70 else "trtllm_mha"
+                )
             # Draft tokens come from a cross-rank candidate gather and the greedy
             # accept from gathered target logits, so the ranks agree without
             # rank 0's broadcasts; keep only the RNG-dependent sites.
@@ -98,7 +103,7 @@ def _minimax_m3_overrides(server_args: Any, hf_config: Any) -> dict:
             if cfg.moe_runner_backend == "auto":
                 overrides["moe_runner_backend"] = "marlin"
             if is_attention_backend_not_set(cfg):
-                overrides["attention_backend"] = "fa3"
+                overrides["attention_backend"] = "triton" if sm70 else "fa3"
             return overrides
         if cfg.moe_runner_backend == "flashinfer_trtllm_routed":
             if cfg.moe_a2a_backend not in ("none", "megamoe"):
