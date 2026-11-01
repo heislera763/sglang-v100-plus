@@ -268,14 +268,15 @@ prefill schedule exceeded VRAM at the unchanged context and was removed; direct
 small-row Tensor Core and unpack-plus-cuBLAS alternatives lost to packed GEMV.
 Coarser FP8 partial reductions helped isolated projections but slowed complete
 speculative cycles and were removed.
-The 2026-11-01 DSpark depth screen retains eight verification positions: four
-positions yielded 49.6 generation tokens/s versus 59.8 for eight, with both at
-1803 prefill tokens/s. Higher acceptance (50.1% versus 36.0%) did not compensate
-for fewer tokens per cycle. This comparison includes one fresh eight-position
-control because the Gen1 PCIe endpoint moved after reboot.
-The same-day layout screen keeps TP8/EP1: EP8 with DSpark8 averaged **807 prefill /
-32.5 generation tokens/s**, versus **1803 / 59.8** for EP1. EP8 uses whole experts
-but currently misses the EP1-specific routed-kernel schedules and quad collectives;
+The 2026-11-01 DSpark depth screen retains eight verification positions: four,
+six and eight yielded **49.6 / 54.5 / 59.8 generation tokens/s**, respectively;
+prefill was **1803 / 1794 / 1803 tokens/s**. Higher acceptance at shorter widths
+did not compensate for fewer tokens per cycle. This comparison includes one fresh
+eight-position control because the Gen1 PCIe endpoint moved after reboot.
+The same-day layout screen keeps TP8/EP1: EP4 and EP8 with DSpark8 averaged
+**819 / 37.1** and **807 / 32.5 prefill/generation tokens/s**, versus **1803 / 59.8**
+for EP1. EP4 splits experts across two-GPU pairs; EP8 uses whole experts.
+Both currently miss the EP1-specific routed-kernel schedules and quad collectives;
 this measures current implementations, not an optimized EP upper bound. Ordinary
 TP4×PP2 failed during weight processing with 30/30, 31/29 and 32/28 layer splits,
 before KV allocation; there is no PP2 throughput result. DSpark currently requires
