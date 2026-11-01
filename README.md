@@ -268,6 +268,11 @@ prefill schedule exceeded VRAM at the unchanged context and was removed; direct
 small-row Tensor Core and unpack-plus-cuBLAS alternatives lost to packed GEMV.
 Coarser FP8 partial reductions helped isolated projections but slowed complete
 speculative cycles and were removed.
+The 2026-11-01 DSpark depth screen retains eight verification positions: four
+positions yielded 49.6 generation tokens/s versus 59.8 for eight, with both at
+1803 prefill tokens/s. Higher acceptance (50.1% versus 36.0%) did not compensate
+for fewer tokens per cycle. This comparison includes one fresh eight-position
+control because the Gen1 PCIe endpoint moved after reboot.
 The initial generic Triton attention path exhausted VRAM during autotuning;
 there is no completed stock-attention throughput baseline.
 
