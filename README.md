@@ -273,6 +273,14 @@ positions yielded 49.6 generation tokens/s versus 59.8 for eight, with both at
 1803 prefill tokens/s. Higher acceptance (50.1% versus 36.0%) did not compensate
 for fewer tokens per cycle. This comparison includes one fresh eight-position
 control because the Gen1 PCIe endpoint moved after reboot.
+The same-day layout screen keeps TP8/EP1: EP8 with DSpark8 averaged **807 prefill /
+32.5 generation tokens/s**, versus **1803 / 59.8** for EP1. EP8 uses whole experts
+but currently misses the EP1-specific routed-kernel schedules and quad collectives;
+this measures current implementations, not an optimized EP upper bound. Ordinary
+TP4×PP2 failed during weight processing with 30/30, 31/29 and 32/28 layer splits,
+before KV allocation; there is no PP2 throughput result. DSpark currently requires
+PP1. MiniMax sparse attention has no implemented DCP KV ownership/distributed
+attention reduction, so GLM's DCP settings do not transfer to this backend.
 The initial generic Triton attention path exhausted VRAM during autotuning;
 there is no completed stock-attention throughput baseline.
 
