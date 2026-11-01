@@ -191,7 +191,8 @@ python -m sglang_v100_plus \
   --mem-fraction-static 0.99 --chunked-prefill-size 1024 \
   --disable-overlap-schedule --disable-prefill-cuda-graph \
   --cuda-graph-backend-decode full --cuda-graph-bs-decode 1 \
-  --speculative-algorithm DSPARK --speculative-num-draft-tokens 8 \
+  --speculative-algorithm DSPARK --speculative-dspark-block-size 6 \
+  --speculative-num-draft-tokens 7 \
   --speculative-draft-model-path "$HOME/models/sglang/MiniMaxAI-MiniMax-M3.1-Flash/dspark" \
   --speculative-draft-attention-backend triton \
   --mm-process-config '{"image":{"device":"cpu"}}' \
@@ -201,8 +202,8 @@ python -m sglang_v100_plus \
 
 MiniMax's Triton backend manages metadata; index scoring, sparse attention and
 draft windows use SM70 FP16 Tensor Cores with FP32 reductions. Vision's D80 heads
-use FP16 SDPA. DSpark proposes seven tokens in parallel, plus the anchor/target
-position; it is not seven sequential MTP steps. Its group32 MXFP8 weights remain
+use FP16 SDPA. The selected DSpark configuration uses six proposals plus the
+anchor/target position; these are not six sequential MTP steps. Its group32 MXFP8 weights remain
 packed. Bounded draft graphs use about 20MiB/rank and bypass the generic 1GiB free
 memory heuristic. Actual allocation failures remain explicit. Fixed-frequency
 RoPE tables are sized to the configured context without changing frequencies.
@@ -272,7 +273,7 @@ The 2026-11-01 DSpark depth screen tested four, six, seven and eight verificatio
 positions: **49.6 / 54.5 / 60.9 / 59.8 generation tokens/s**, respectively;
 prefill was **1803 / 1794 / 1800 / 1803 tokens/s**. Seven narrowly leads the mean,
 but trades slower coding for faster writing/document analysis, with changed
-generated sequences. Eight remains the launch reference; this short screen does
+generated sequences. Seven is the selected launch setting; this short screen does
 not establish a consistent seven-position advantage. Four/six shorten cycles but
 lose too many tokens per cycle. This comparison includes one fresh eight-position
 control because the Gen1 PCIe endpoint moved after reboot.
