@@ -1,6 +1,5 @@
 {
   "upstream_paths": {
-    "python/sglang/srt/layers/attention/triton_backend.py": "Keep replicated draft attention outside target DCP: preserve TP-local query/KV head geometry and all virtual cache writes; targets retain DCP owner masks and rank-local slots.",
     "python/sglang/srt/managers/schedule_batch.py": "Permit a backend to coarsen prefill checkpoint placement while preserving default grid validation and tracking logic; SM70 aligns FP16 reuse with prefill persistence boundaries.",
     "python/sglang/kernels/ops/attention/__init__.py": "Register lazy SM70 canonical attention, windowed GQA, sparse indexer and fused K-pool decode operators.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer.py": "Volta sparse-attention indexer with FP16 cache support.",
@@ -70,6 +69,7 @@
     "python/sglang/srt/speculative/draft_worker_common.py": "Expose the conservative draft CUDA-graph memory heuristic as a shared hook point; actual graph allocation failures remain explicit.",
     "python/sglang/srt/speculative/dflash_worker_v2.py": "Use the shared draft-graph memory policy for qualified single-request MiniMax drafts.",
     "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation.",
-    "python/sglang/srt/distributed/device_communicators/pynccl.py": "Allow a per-communicator NCCL max-CTA bound, retaining default behavior. MiniMax quad/bridge communicators use four channels to bound their VRAM overhead."
+    "python/sglang/srt/distributed/device_communicators/pynccl.py": "Allow a per-communicator NCCL max-CTA bound, retaining default behavior. MiniMax quad/bridge communicators use four channels to bound their VRAM overhead.",
+    "python/sglang/srt/configs/attention_execution.py": "Keep draft Triton execution width consistent with TP-sharded draft KV heads; the shared policy also drives unified draft KV planning."
   }
 }

@@ -517,7 +517,7 @@ class SM70SparseAttnBackend(DeepseekSparseAttnBackend):
         stream = int(torch.cuda.current_stream(q_nope.device).cuda_stream)
         workspace = self.v100_sparse_workspaces.setdefault(stream, {})
         lengths = None
-        if self.dcp_size > 1:
+        if self.attn_dcp_size > 1:
             from sglang.kernels.ops.attention.dsa.transform_index import (
                 transform_index_page_table_dcp,
             )
@@ -527,8 +527,8 @@ class SM70SparseAttnBackend(DeepseekSparseAttnBackend):
             # score order and duplicate multiplicity. No full-history gather.
             page_table_1, lengths = transform_index_page_table_dcp(
                 page_table_1.reshape(q_nope.shape[0], -1),
-                self.dcp_size,
-                self.dcp_rank,
+                self.attn_dcp_size,
+                self.attn_dcp_rank,
             )
         return sparse_attention_v100(
             q_nope,
@@ -537,5 +537,5 @@ class SM70SparseAttnBackend(DeepseekSparseAttnBackend):
             sm_scale,
             lengths=lengths,
             workspace=workspace,
-            return_lse=self.dcp_size > 1,
+            return_lse=self.attn_dcp_size > 1,
         )

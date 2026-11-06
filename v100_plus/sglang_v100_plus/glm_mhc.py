@@ -18,6 +18,7 @@ def mhc_pre_dispatch(
     sinkhorn_repeat,
     norm_weight=None,
     norm_eps=None,
+    n_splits_pre=32,
 ):
     """Share only eager GLM pre-read work; residual/post remain replicated.
 
@@ -62,6 +63,7 @@ def mhc_pre_dispatch(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
+            n_splits_pre=n_splits_pre,
         )
 
     from sglang.kernels.ops.layernorm.mhc_sm70 import mhc_pre_shard_sm70

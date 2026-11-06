@@ -41,7 +41,7 @@ def sparse_backend_init(original, self, runner):
 
 def attention_init(original, self, config, *args, **kwargs):
     from sglang.srt.runtime_context import get_model, get_spec
-    from sglang.srt.utils.hf_transformers_utils import get_rope_config
+    from sglang.srt.hf_transformers import get_rope_config
 
     limit = get_model().context_length
     if limit is not None and limit < config.max_position_embeddings:

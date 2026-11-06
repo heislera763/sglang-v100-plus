@@ -17,6 +17,7 @@ _PLATFORM = "sglang.srt.arg_groups.model_overrides.deepseek_v2.get_platform"
 def _cfg(**kw):
     base = dict(
         dcp_size=4,
+        attention_backend=None,
         enable_hisparse=False,
         enable_hierarchical_cache=False,
         disaggregation_mode="null",

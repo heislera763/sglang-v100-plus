@@ -90,7 +90,7 @@ def test_dflash_draft_backend_uses_generic_attention_policy(explicit_backend, ex
             return_value=False,
         ),
         patch(
-            "sglang.srt.utils.hf_transformers_utils.get_config",
+            "sglang.srt.hf_transformers.get_config",
             return_value=draft_config,
         ),
     ):
@@ -224,12 +224,10 @@ def test_dflash_captures_selected_layer_outputs_before_final_norm():
         output, captured = wrapper.model(
             torch.tensor([0]),
             torch.tensor([0]),
-            SimpleNamespace(can_run_tbo=False),
+            SimpleNamespace(can_run_tbo=False, aux_hidden_states_buffer=None),
             input_embeds=torch.zeros(1, 2),
         )
-    assert len(captured) == 2
-    torch.testing.assert_close(captured[0], torch.full((1, 2), 11.0))
-    torch.testing.assert_close(captured[1], torch.full((1, 2), 13.0))
+    torch.testing.assert_close(captured, torch.tensor([[11.0, 11.0, 13.0, 13.0]]))
     torch.testing.assert_close(output, torch.full((1, 2), 113.0))
 
 

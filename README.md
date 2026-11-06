@@ -13,11 +13,11 @@ metadata and cache/state lifetimes. Advance `main` after correctness and model
 throughput checks. Qwen retains its existing backend during this work.
 Clone remotes: `origin` is this fork; `upstream` is `sgl-project/sglang`.
 
-Integrated upstream: [59af99a8](https://github.com/sgl-project/sglang/commit/59af99a873f39c3b281df0f9c609b3a0d3270726), integrated 2026-10-28.
-This update brings 479 upstream commits, including cache/state ownership changes,
-hybrid MTP fixes, seeded draft proposals and segmented prompt rendering. SM70
-adapters honor the new routing/zeroing contract; upstream's corrected Marlin bias
-handling replaces our old patch. Paired prefill uses the new iteration-ID owner.
+Integrated upstream: [771f7073](https://github.com/sgl-project/sglang/commit/771f70732), integrated 2026-11-06.
+This update brings 678 upstream commits, including FP32 router preservation,
+KDA padded-output fixes and GLM tool-name normalization. SM70 adapters follow the
+new DSA and mHC interfaces; draft KV planning and Triton execution share the
+same replicated-token policy. CUDA/Marlin/FA builds remain SM70-compatible.
 Hardware adapters live in [v100_plus/sglang_v100_plus](v100_plus/sglang_v100_plus),
 reusable operators in [python/sglang/kernels/ops](python/sglang/kernels/ops), and
 build/Marlin changes in [v100_plus/aot](v100_plus/aot) and [v100_plus/patches](v100_plus/patches).

@@ -75,7 +75,8 @@ class TestV100Prefill(CustomTestCase):
         value = value.expand(1024, 4, 4096).contiguous()
         weight = torch.ones(4096, dtype=torch.float16)
 
-        def full(residual, _fn, _scale, _base, *_args):
+        def full(residual, _fn, _scale, _base, *_args, n_splits_pre):
+            self.assertEqual(n_splits_pre, 8)
             norm_weight, norm_eps = _args[-2:]
             layer = residual[:, 0] * norm_weight + norm_eps
             return residual[:, :, :1].float(), residual[:, :, :4].float(), layer, True
@@ -113,6 +114,7 @@ class TestV100Prefill(CustomTestCase):
                     20,
                     weight,
                     0.5,
+                    n_splits_pre=8,
                 )
                 self.assertTrue(norm_fused)
                 self.assertEqual(post.shape, (1024, 4, 1))
