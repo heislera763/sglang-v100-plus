@@ -13,11 +13,11 @@ metadata and cache/state lifetimes. Advance `main` after correctness and model
 throughput checks. Qwen retains its existing backend during this work.
 Clone remotes: `origin` is this fork; `upstream` is `sgl-project/sglang`.
 
-Integrated upstream: [771f7073](https://github.com/sgl-project/sglang/commit/771f70732), integrated 2026-11-06.
-This update brings 678 upstream commits, including FP32 router preservation,
-KDA padded-output fixes and GLM tool-name normalization. SM70 adapters follow the
-new DSA and mHC interfaces; draft KV planning and Triton execution share the
-same replicated-token policy. CUDA/Marlin/FA builds remain SM70-compatible.
+Integrated upstream: [c3c292b6](https://github.com/sgl-project/sglang/commit/c3c292b65ab42efd933e0c77cfb48eb69f1b81d0), integrated 2026-11-07.
+The prior update included GLM tool-name normalization and KDA fixes; the latest
+also adds a fused GLM KDA decode path for newer GPUs. The SM70 profile continues
+to use its own KDA kernels. Draft KV planning and Triton execution share the
+same replicated-token policy.
 Hardware adapters live in [v100_plus/sglang_v100_plus](v100_plus/sglang_v100_plus),
 reusable operators in [python/sglang/kernels/ops](python/sglang/kernels/ops), and
 build/Marlin changes in [v100_plus/aot](v100_plus/aot) and [v100_plus/patches](v100_plus/patches).
