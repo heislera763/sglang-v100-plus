@@ -4,8 +4,6 @@
     "python/sglang/kernels/ops/attention/__init__.py": "Register lazy SM70 canonical attention, windowed GQA, sparse indexer and fused K-pool decode operators.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer.py": "Volta sparse-attention indexer with FP16 cache support.",
     "python/sglang/kernels/ops/attention/dsa/sm70_pool4_decode.py": "Volta K-pool/indexer decode with coarse live-history gathers. Only counted scratch prefixes are initialized; causal scoring masks all future rows.",
-    "python/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py": "FP16 sparse MLA prefill dispatch and shared SM70 small-row tile policy for target verification.",
-    "python/sglang/kernels/ops/attention/dsa/triton_sparse_mla_decode.py": "Preserve FP16 output and shared SM70 small-row geometry while using upstream consolidated fused/split-K kernels.",
     "python/sglang/kernels/ops/gemm/__init__.py": "Register Volta packed-FP8 and encoded-NVFP4 GEMV and small-row routed MMA implementations.",
     "python/sglang/kernels/ops/gemm/sm70_nvfp4_gemv.py": "FP32-accumulating NVFP4 GEMV over native SM70 Marlin packed weights/scales, with device-counted masked routing and caller-selected inactive-output preservation/clearing.",
     "python/sglang/kernels/jit/csrc/gemm/sm70_fp8_gemv.cuh": "SM70 packed-word FP8 GEMV through eight verification rows with scale reuse, FP16 reconstructed operands and FP32 partial sums. Five-to-eight-row group32 projections use FP32 FMA; earlier <=4-row arithmetic is preserved.",

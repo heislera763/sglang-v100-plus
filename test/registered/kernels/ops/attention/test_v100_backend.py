@@ -9,7 +9,7 @@ import torch
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
 
-register_cuda_ci(est_time=15, stage="jit-kernel-unit", runner_config="1-gpu-large")
+register_cuda_ci(est_time=60, stage="base-b-kernel-unit", runner_config="1-gpu-large")
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 0),
     reason="canonical SM70 FA adapter coverage",
@@ -51,6 +51,8 @@ def test_sparse_adapter_restores_prefill_padding(heads, live, total):
     )
 
     class Backend:
+        attn_dcp_size = 1
+
         def forward(self, q, k, v, layer, batch, save, **kwargs):
             return SM70SparseAttnBackend._forward_v100_sparse(
                 self, q, kwargs["q_rope"], kv, kwargs["topk_indices"], 512**-0.5, 512
@@ -305,6 +307,7 @@ class TestWindowAttention(CustomTestCase):
         backend.use_dense_fp8_chunked_prefill = False
         backend.use_mla = backend.enable_deterministic = False
         backend.use_verify_shared_kv = backend.use_verify_splitkv = False
+        backend.use_verify_gfx115 = False
         backend.dcp_size = 1
         backend.page_size = 256
         backend._v100_dflash = True
@@ -313,6 +316,12 @@ class TestWindowAttention(CustomTestCase):
         backend.token_to_kv_pool = SimpleNamespace(
             get_key_buffer=lambda _: kc,
             get_value_buffer=lambda _: vc,
+            layer_transfer_counter=None,
+        )
+        from sglang.srt.mem_cache.kv.router import KVLayerRouter
+
+        backend.token_to_kv_pool.layer_router = KVLayerRouter.from_layer_maps(
+            backend.token_to_kv_pool, [("full", backend.token_to_kv_pool, {0: 0})]
         )
         backend.forward_metadata = SimpleNamespace(
             window_kv_indptr=ptr,

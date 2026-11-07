@@ -25,26 +25,29 @@ def reference_quantize(x, round_scale):
     return (x / scale).clamp(-448, 448).to(torch.float8_e4m3fn), scale
 
 
-@pytest.mark.parametrize("query_chunk", [4, 8, 16, 32, 64, 128])
-def test_scoring_query_batches_preserve_causality_and_head_reduction(query_chunk):
-    """Larger launches must not expose a future pool or mix query/head rows."""
+def _score_chunks(query, keys, scales, weights, lengths, chunk):
+    return torch.cat(
+        [
+            mqa_logits_sm70(
+                query[i : i + chunk],
+                keys,
+                scales,
+                weights[i : i + chunk],
+                lengths[i : i + chunk],
+            )
+            for i in range(0, query.shape[0], chunk)
+        ]
+    )
+
+
+def test_scoring_query_batches_preserve_causality_and_head_reduction(subtests):
+    """All chunk sizes share one fixture and independent arithmetic oracle."""
     torch.manual_seed(739)
     query, _ = fp8_quantize_sm70(torch.randn(151, 32, 128, device="cuda"))
     keys, scales = fp8_quantize_sm70(torch.randn(521, 128, device="cuda"))
     weights = torch.randn(151, 32, device="cuda") * 0.01
     lengths = torch.arange(151, device="cuda", dtype=torch.int32) // 4 + 485
     lengths[0] = 0
-    chunks = [
-        mqa_logits_sm70(
-            query[i : i + query_chunk],
-            keys,
-            scales,
-            weights[i : i + query_chunk],
-            lengths[i : i + query_chunk],
-        )
-        for i in range(0, query.shape[0], query_chunk)
-    ]
-    actual = torch.cat(chunks).cpu()
     reference_dots = torch.einsum(
         "thd,kd->thk", query.cpu().float(), keys.cpu().float()
     )
@@ -52,21 +55,13 @@ def test_scoring_query_batches_preserve_causality_and_head_reduction(query_chunk
     expected *= scales.cpu().reshape(1, -1)
     future = torch.arange(keys.shape[0])[None, :] >= lengths.cpu()[:, None]
     expected.masked_fill_(future, float("-inf"))
-    assert torch.equal(torch.isneginf(actual), future)
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
-    baseline = torch.cat(
-        [
-            mqa_logits_sm70(
-                query[i : i + 32],
-                keys,
-                scales,
-                weights[i : i + 32],
-                lengths[i : i + 32],
-            )
-            for i in range(0, query.shape[0], 32)
-        ]
-    ).cpu()
-    assert torch.equal(actual, baseline)
+    baseline = _score_chunks(query, keys, scales, weights, lengths, 32).cpu()
+    for chunk in (4, 8, 16, 32, 64, 128):
+        with subtests.test(chunk=chunk):
+            actual = _score_chunks(query, keys, scales, weights, lengths, chunk).cpu()
+            assert torch.equal(torch.isneginf(actual), future)
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
+            assert torch.equal(actual, baseline)
 
 
 @pytest.mark.parametrize("batched", [False, True])
@@ -104,8 +99,7 @@ def test_scoring_private_buffer_reuse_is_exact_and_preserves_inputs(batched):
         assert torch.equal(original.view(dtype), snapshot.view(dtype))
 
 
-@pytest.mark.parametrize("chunk", [4, 8, 16])
-def test_long_history_scoring_batches_preserve_exact_logits(chunk):
+def test_long_history_scoring_batches_preserve_exact_logits(subtests):
     # Smaller history-dependent query batches must preserve the same per-row
     # GEMM and head reduction at the384Ki-token pool4 history size.
     torch.manual_seed(745)
@@ -116,19 +110,10 @@ def test_long_history_scoring_batches_preserve_exact_logits(chunk):
     weights = torch.randn(rows, heads, device="cuda")
     lengths = torch.arange(rows, device="cuda", dtype=torch.int32) + history - rows
     expected = mqa_logits_sm70(query, keys, scales, weights, lengths)
-    actual = torch.cat(
-        [
-            mqa_logits_sm70(
-                query[i : i + chunk],
-                keys,
-                scales,
-                weights[i : i + chunk],
-                lengths[i : i + chunk],
-            )
-            for i in range(0, rows, chunk)
-        ]
-    )
-    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+    for chunk in (4, 8, 16):
+        with subtests.test(chunk=chunk):
+            actual = _score_chunks(query, keys, scales, weights, lengths, chunk)
+            assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
 
 
 def test_scoring_workspace_does_not_duplicate_full_head_scores():

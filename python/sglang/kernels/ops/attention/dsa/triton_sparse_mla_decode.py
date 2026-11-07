@@ -1,11 +1,11 @@
-"""Triton sparse MLA decode with FP8, BF16 and FP16 KV cache support.
+"""Triton sparse MLA decode with FP8 and BF16 KV cache support.
 
 Decode-tuned launcher for the fused / split-K kernels of ``triton_sparse_mla``
 on DSA shapes:
-  q:       [bs, H, DIM]     fp8/bf16/fp16 (DIM=D_V+D_TAIL)
-  kv:      [num_pages, 1, DIM]  fp8/bf16/fp16
+  q:       [bs, H, DIM]     fp8/bf16 (DIM=576 = D_V+D_TAIL)
+  kv:      [num_pages, 1, DIM]  fp8/bf16
   indices: [bs, 1, topk]    int32
-  output:  [1, bs, H, D_V]  fp16 for fp16 queries, bf16 otherwise
+  output:  [1, bs, H, D_V]  bf16
 """
 
 import torch
@@ -25,7 +25,6 @@ from sglang.kernels.ops.attention.dsa.triton_sparse_mla import (
     _page_offsets_fit_i32,
     _reduce_d_chunk,
     _row_strides,
-    _sm70_sparse_mla_small_rows,
     _sparse_mla_block_k,
     _sparse_mla_fused_kernel,
     _sparse_mla_reduce_kernel,
@@ -54,7 +53,6 @@ def _get_splitk_bufs(
     d_v: int,
     device: torch.device,
     workspace: _SplitKWorkspace | None = None,
-    dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if workspace is None:
         stream_id = int(torch.cuda.current_stream(device).cuda_stream)
@@ -63,11 +61,7 @@ def _get_splitk_bufs(
     needed_lse = bs * kv_splits * h_padded
     needed_acc = bs * kv_splits * h_padded * d_v
     for lse_buf, acc_buf in reversed(workspace):
-        if (
-            acc_buf.dtype == dtype
-            and lse_buf.numel() >= needed_lse
-            and acc_buf.numel() >= needed_acc
-        ):
+        if lse_buf.numel() >= needed_lse and acc_buf.numel() >= needed_acc:
             lse = lse_buf[:needed_lse].view(bs, kv_splits, h_padded)
             acc = acc_buf[:needed_acc].view(bs, kv_splits, h_padded, d_v)
             return lse, acc
@@ -76,7 +70,7 @@ def _get_splitk_bufs(
     # round up so a growing shape sequence adds O(log range) buffers, not one each.
     capacity_lse = _next_pow2(max(needed_lse, 2 * _cu_count(device) * 16))
     lse_buf = torch.empty(capacity_lse, dtype=torch.float32, device=device)
-    acc_buf = torch.empty(capacity_lse * d_v, dtype=dtype, device=device)
+    acc_buf = torch.empty(capacity_lse * d_v, dtype=torch.bfloat16, device=device)
     workspace.append((lse_buf, acc_buf))
     lse = lse_buf[:needed_lse].view(bs, kv_splits, h_padded)
     acc = acc_buf[:needed_acc].view(bs, kv_splits, h_padded, d_v)
@@ -97,21 +91,20 @@ def triton_sparse_mla_decode_splitk(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Split-K Triton sparse MLA decode (DSv4 pattern).
 
-    q_nope:  [bs, H, d_v] fp8/bf16/fp16
-    q_rope:  [bs, H, d_tail] fp8/bf16/fp16; d_tail may be zero
-    kv:      [num_pages, 1, DIM] fp8/bf16/fp16
+    q_nope:  [bs, H, d_v] fp8/bf16
+    q_rope:  [bs, H, d_tail] fp8/bf16
+    kv:      [num_pages, 1, DIM] fp8/bf16
     indices: [bs, 1, topk] int32
     workspace: backend-owned grow-only split-K buffers for graph-safe reuse
     lengths: optional [bs] int32 in [0, topk]; only the first lengths[i]
              indices of row i are scanned, and the rest of the row must be -1.
              Under DCP these are the owned counts and the -1 tail written by
              transform_index_page_table_dcp (transform_index.py).
-    returns: [1, bs, H, d_v], FP16 for FP16 inputs, BF16 otherwise, plus a [bs, H] fp32 base-2 LSE if return_lse
+    returns: [1, bs, H, d_v] bf16, plus a [bs, H] fp32 base-2 LSE if return_lse
     """
     kv, kv_scaled = _as_scaled_fp8_kv(kv, d_v, q_rope.shape[-1])
     is_fp8 = _validate_input_dtypes(q_nope, q_rope, kv)
     use_fp8_dot = is_fp8 and not kv_scaled
-    out_dtype = torch.float16 if q_nope.dtype == torch.float16 else torch.bfloat16
     bs, H, d_v_in = q_nope.shape
     assert d_v_in == d_v
     d_tail = q_rope.shape[-1]
@@ -134,19 +127,6 @@ def triton_sparse_mla_decode_splitk(
 
     BLOCK_H = 16
     BLOCK_K = _sparse_mla_block_k(kv)
-    sm70_glm_decode = (
-        bs == 1
-        and H == 8
-        and d_v == 512
-        and d_tail == 0
-        and kv.dtype == torch.float16
-        and torch.version.hip is None
-        and torch.cuda.get_device_capability(kv.device) == (7, 0)
-    )
-    if _sm70_sparse_mla_small_rows(q_nope, q_rope, kv, d_v):
-        # Share the small-row policy with target verification; retain the
-        # separate qualified eight-head logical/storage geometry below.
-        BLOCK_K = min(BLOCK_K, 16)
     n_head_blocks = (H + BLOCK_H - 1) // BLOCK_H
     h_padded = n_head_blocks * BLOCK_H
 
@@ -207,7 +187,7 @@ def triton_sparse_mla_decode_splitk(
         fused_num_warps = 4
         if optimize_gfx950_fp8:
             fused_num_warps = _gfx950_sparse_mla_num_warps(base_ctas, 1, num_cu)
-        out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=out_dtype)
+        out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=torch.bfloat16)
         with _no_async_copy():
             _sparse_mla_fused_kernel[(bs, n_head_blocks)](
                 q_nope,
@@ -247,18 +227,6 @@ def triton_sparse_mla_decode_splitk(
             )
         return (out.unsqueeze(0), lse) if return_lse else out.unsqueeze(0)
 
-    if (
-        sm70_glm_decode
-        and q_nope.dtype == torch.float16
-        and out_dtype == torch.float16
-        and topk == 2051
-        and kv_splits == 32
-    ):
-        # Exact intermediate, graph, and all-rank real-input gates cover this
-        # GLM TP8 shape. Keep the 16-head storage/reduction stride above while
-        # dropping unused logical rows to remove compiler-reported spills.
-        BLOCK_H = 8
-
     if lengths is None:
         tiles_per_split = (topk + kv_splits * BLOCK_K - 1) // (kv_splits * BLOCK_K)
         active_splits = (topk + tiles_per_split * BLOCK_K - 1) // (
@@ -275,9 +243,9 @@ def triton_sparse_mla_decode_splitk(
         split_num_warps = _gfx950_sparse_mla_num_warps(base_ctas, active_splits, num_cu)
 
     lse_partial, acc_partial = _get_splitk_bufs(
-        bs, kv_splits, h_padded, d_v, q_nope.device, workspace, dtype=out_dtype
+        bs, kv_splits, h_padded, d_v, q_nope.device, workspace
     )
-    out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=out_dtype)
+    out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=torch.bfloat16)
 
     grid_split = (bs, n_head_blocks, kv_splits)
     with _no_async_copy():
