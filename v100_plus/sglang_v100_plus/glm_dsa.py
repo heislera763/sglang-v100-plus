@@ -9,12 +9,7 @@ from sglang.kernels.ops.attention.dsa.sm70_indexer import (
     fp8_quantize_sm70,
     kpool_compress_sm70,
 )
-from sglang.kernels.ops.attention.dsa.sm70_indexer_decode import (
-    mqa_logits_decode_sm70,
-)
-from sglang.kernels.ops.attention.dsa.sm70_indexer_prefill import (
-    mqa_logits_prefill_sm70,
-)
+from sglang.kernels.ops.attention.dsa.sm70_indexer_score import mqa_logits_sm70
 from sglang.kernels.ops.attention.dsa.sm70_pool4_decode import (
     pool4_cache_page_size,
     pool4_decode_sm70,
@@ -128,11 +123,6 @@ def read_pooled_cache(buf, locations):
 
 
 class SM70IndexerKPool(IndexerKPool):
-    # Bound the reduced [query, pooled-history] FP32 score tensor.
-    # A query's GEMM reduction and causal pool/tail lengths remain independent
-    # of this launch batching; cache writes still happen once per input chunk.
-    _prefill_query_chunk_size = 128
-
     def __init__(self, *args, **kwargs):
         kwargs["alt_stream"] = None
         super().__init__(*args, **kwargs)
@@ -196,7 +186,7 @@ class SM70IndexerKPool(IndexerKPool):
             )
             if not return_indices:
                 return None
-            logits = mqa_logits_decode_sm70(
+            logits = mqa_logits_sm70(
                 query_fp8, cached_keys, cached_scales, weights, pools
             )
             return topk_from_pooled_history_logits(
@@ -212,11 +202,7 @@ class SM70IndexerKPool(IndexerKPool):
         sparse_backend = getattr(backend, "full_attn_backend", backend)
         request_ids = sparse_backend.sm70_request_ids
         seq_lens = forward_batch.seq_lens_cpu.tolist()
-        chunk_lens = (
-            forward_batch.extend_seq_lens_cpu
-            if mode.is_extend_without_speculative()
-            else [1] * len(request_ids)
-        )
+        chunk_lens = forward_batch.extend_seq_lens_cpu
         outputs = []
         offset = 0
         for request, seq_len, count in zip(request_ids, seq_lens, chunk_lens):
@@ -292,7 +278,6 @@ class SM70IndexerKPool(IndexerKPool):
                 score_rows = max(1, (128 << 20) // score_row_bytes)
                 score_rows = 1 << (score_rows.bit_length() - 1)
                 query_chunk = min(
-                    self._prefill_query_chunk_size,
                     128 if seq_len <= 8192 else 32,
                     score_rows,
                 )
@@ -320,7 +305,7 @@ class SM70IndexerKPool(IndexerKPool):
                         dtype=torch.int32,
                     )
                     pools = torch.div(lengths, 4, rounding_mode="floor")
-                    logits = mqa_logits_prefill_sm70(
+                    logits = mqa_logits_sm70(
                         query_fp8[offset + start : offset + stop],
                         cached_keys,
                         cached_scales,
@@ -417,9 +402,7 @@ class SM70IndexerKPool(IndexerKPool):
             * (self.n_heads**-0.5 * self.softmax_scale)
             * query_scale.squeeze(-1)
         )
-        logits = mqa_logits_decode_sm70(
-            query_fp8, cached_keys, cached_scales, weights, pools
-        )
+        logits = mqa_logits_sm70(query_fp8, cached_keys, cached_scales, weights, pools)
         return topk_from_pooled_history_logits(
             logits,
             pools,

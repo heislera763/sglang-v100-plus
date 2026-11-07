@@ -27,7 +27,6 @@
     "python/sglang/srt/speculative/eagle_worker_v2.py": "Avoid optional newer-GPU DSA imports; preserve PP draft probabilities and per-request greedy prefill proposals.",
     "python/sglang/srt/speculative/pp_spec_relay.py": "Keep proposal probabilities aligned with request identities across the PP relay.",
     "python/sglang/test/test_utils.py": "Handle CPU-only and UUID CUDA visibility without breaking numeric CI test-port lanes.",
-    "python/sglang/kernels/ops/attention/dsa/sm70_indexer_decode.py": "Volta MMA decode/verification index scoring: live causal tile bounds and fused FP32 head reduction, without dense per-head score scratch.",
     "python/sglang/kernels/ops/gemm/sm70_nvfp4_routed.py": "Volta MMA small-row routed NVFP4 GEMM with encoded Marlin scales and K-major decoded weights; narrow long-K projections use eight FP32 partitions and capacity-bounded invocation-owned scratch, applying router/global scaling before the single FP16 output store.",
     "python/sglang/kernels/ops/attention/v100.py": "Lazy canonical V100 sparse H8/H16/H32/H64, dense vision, bounded device-counted DFlash2 GQA window and recurrent CUDA adapters; sparse split work through eight verification queries, caller-owned scratch, FP16 KV/normalized partials and FP32 LSE reduction; resolved per-query window semantics preserved.",
     "python/sglang/srt/arg_groups/fields/exec_.py": "Expose canonical V100 DSA profile and resolvable linear-attention backend fields.",
@@ -53,7 +52,6 @@
     "python/sglang/kernels/jit/csrc/layernorm/sm70_mhc_prepare.cuh": "Fuse FP16 residual cast and owned-shard squared mean for bulk mHC, preserving contiguous Torch FP32 reduction order and full-shape projection.",
     "python/sglang/srt/multimodal/processors/embedding_gemma2.py": "Forward optional per-request JPEG decode placement through the existing custom media loader.",
     "python/sglang/srt/entrypoints/openai/parallel_prompt_encode.py": "Limit HF prompt chunking to native HF backends so alternative encoders such as fastokens retain their own parallelism and avoid unsupported postprocessor introspection.",
-    "python/sglang/kernels/ops/attention/dsa/sm70_indexer_prefill.py": "Dynamic-history Volta MMA prefill index scoring with fused FP32 head reduction/scaling; adjacent queries reuse one key tile and the same query/accumulator scratch, preserving24KiB shared memory.",
     "python/sglang/kernels/ops/attention/metadata.py": "Bound sparse top-k backscan loads for non-block-aligned selected widths.",
     "python/sglang/kernels/ops/attention/linear/fused_sigmoid_gating_recurrent.py": "Optional FP16 recurrent state rounding at each verification step.",
     "python/sglang/kernels/ops/moe/zero_inactive_routes.py": "GPU-counted inactive-route clearing for native SM70 GEMMs; preserve omitted output rows and skip unused routing capacity under upstream sorted-prefix or scattered-expert contracts.",
@@ -68,6 +66,7 @@
     "python/sglang/srt/speculative/dflash_worker_v2.py": "Use the shared draft-graph memory policy for qualified single-request MiniMax drafts.",
     "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation.",
     "python/sglang/srt/distributed/device_communicators/pynccl.py": "Allow a per-communicator NCCL max-CTA bound, retaining default behavior. MiniMax quad/bridge communicators use four channels to bound their VRAM overhead.",
-    "python/sglang/srt/configs/attention_execution.py": "Keep draft Triton execution width consistent with TP-sharded draft KV heads; the shared policy also drives unified draft KV planning."
+    "python/sglang/srt/configs/attention_execution.py": "Keep draft Triton execution width consistent with TP-sharded draft KV heads; the shared policy also drives unified draft KV planning.",
+    "python/sglang/kernels/ops/attention/dsa/sm70_indexer_score.py": "Unified Volta MMA learned-index scoring with shared-bank paired prefill and per-query decode, FP32 weighting/reduction, live causal bounds and FP16 Tensor Core operands."
   }
 }

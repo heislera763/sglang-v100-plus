@@ -6,8 +6,8 @@ import torch
 from sglang.kernels.ops.attention.dsa.sm70_indexer import (
     fp8_quantize_sm70,
     kpool_compress_sm70,
-    mqa_logits_sm70,
 )
+from sglang.kernels.ops.attention.dsa.sm70_indexer_score import mqa_logits_sm70
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=120, stage="base-b-kernel-unit", runner_config="1-gpu-large")
@@ -25,116 +25,21 @@ def reference_quantize(x, round_scale):
     return (x / scale).clamp(-448, 448).to(torch.float8_e4m3fn), scale
 
 
-def _score_chunks(query, keys, scales, weights, lengths, chunk):
-    return torch.cat(
-        [
-            mqa_logits_sm70(
-                query[i : i + chunk],
-                keys,
-                scales,
-                weights[i : i + chunk],
-                lengths[i : i + chunk],
-            )
-            for i in range(0, query.shape[0], chunk)
-        ]
-    )
-
-
-def test_scoring_query_batches_preserve_causality_and_head_reduction(subtests):
-    """All chunk sizes share one fixture and independent arithmetic oracle."""
-    torch.manual_seed(739)
-    query, _ = fp8_quantize_sm70(torch.randn(151, 32, 128, device="cuda"))
-    keys, scales = fp8_quantize_sm70(torch.randn(521, 128, device="cuda"))
-    weights = torch.randn(151, 32, device="cuda") * 0.01
-    lengths = torch.arange(151, device="cuda", dtype=torch.int32) // 4 + 485
-    lengths[0] = 0
-    reference_dots = torch.einsum(
-        "thd,kd->thk", query.cpu().float(), keys.cpu().float()
-    )
-    expected = (reference_dots.relu() * weights.cpu()[:, :, None]).sum(1)
-    expected *= scales.cpu().reshape(1, -1)
-    future = torch.arange(keys.shape[0])[None, :] >= lengths.cpu()[:, None]
-    expected.masked_fill_(future, float("-inf"))
-    baseline = _score_chunks(query, keys, scales, weights, lengths, 32).cpu()
-    for chunk in (4, 8, 16, 32, 64, 128):
-        with subtests.test(chunk=chunk):
-            actual = _score_chunks(query, keys, scales, weights, lengths, chunk).cpu()
-            assert torch.equal(torch.isneginf(actual), future)
-            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
-            assert torch.equal(actual, baseline)
-
-
-@pytest.mark.parametrize("batched", [False, True])
-def test_scoring_private_buffer_reuse_is_exact_and_preserves_inputs(batched):
-    torch.manual_seed(741)
-    rows, heads, history = (4, 32, 521) if batched else (32, 32, 521)
-    query, _ = fp8_quantize_sm70(torch.randn(rows, heads, 128, device="cuda"))
-    keys = torch.randn(
-        *((rows, history, 128) if batched else (history, 128)),
-        device="cuda",
-        dtype=torch.float16,
-    )
-    scales = torch.rand(*((rows, history) if batched else (history, 1)), device="cuda")
-    weights = torch.randn(rows, heads, device="cuda")
-    lengths = torch.arange(rows, device="cuda", dtype=torch.int32) + history - rows
-    lengths[0] = 0
-    inputs = (query, keys, scales, weights, lengths)
-    saved = [x.clone() for x in inputs]
-    if batched:
-        dots = torch.bmm(query.half(), keys.transpose(1, 2), out_dtype=torch.float32)
-    else:
-        dots = torch.mm(
-            query.half().reshape(-1, 128), keys.half().T, out_dtype=torch.float32
-        ).reshape(rows, heads, -1)
-    expected = (dots.relu() * weights.float().unsqueeze(-1)).sum(1)
-    expected *= scales if batched else scales.reshape(1, -1)
-    expected.masked_fill_(
-        torch.arange(history, device="cuda")[None, :] >= lengths[:, None],
-        float("-inf"),
-    )
-    actual = mqa_logits_sm70(*inputs)
-    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
-    for original, snapshot in zip(inputs, saved):
-        dtype = torch.uint8 if original.dtype == torch.float8_e4m3fn else original.dtype
-        assert torch.equal(original.view(dtype), snapshot.view(dtype))
-
-
-def test_long_history_scoring_batches_preserve_exact_logits(subtests):
-    # Smaller history-dependent query batches must preserve the same per-row
-    # GEMM and head reduction at the384Ki-token pool4 history size.
-    torch.manual_seed(745)
-    rows, heads, history = 32, 32, 98304
-    query = torch.randn(rows, heads, 128, device="cuda", dtype=torch.float16)
-    keys = torch.randn(history, 128, device="cuda", dtype=torch.float16)
-    scales = torch.rand(history, 1, device="cuda")
-    weights = torch.randn(rows, heads, device="cuda")
-    lengths = torch.arange(rows, device="cuda", dtype=torch.int32) + history - rows
-    expected = mqa_logits_sm70(query, keys, scales, weights, lengths)
-    for chunk in (4, 8, 16):
-        with subtests.test(chunk=chunk):
-            actual = _score_chunks(query, keys, scales, weights, lengths, chunk)
-            assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
-
-
-def test_scoring_workspace_does_not_duplicate_full_head_scores():
-    # Each redundant full-size intermediate adds64MiB for this shape.
-    # Warm the same GEMM first so a lazy library workspace is not the contract.
-    rows, heads, history = 32, 32, 16384
-    query = torch.ones(rows, heads, 128, device="cuda", dtype=torch.float16)
-    keys = torch.ones(history, 128, device="cuda", dtype=torch.float16)
-    scales = torch.ones(history, 1, device="cuda")
-    weights = torch.ones(rows, heads, device="cuda")
-    lengths = torch.full((rows,), history, device="cuda", dtype=torch.int32)
-    mqa_logits_sm70(query, keys, scales, weights, lengths)
-    torch.cuda.synchronize()
-    live = torch.cuda.memory_allocated()
-    torch.cuda.reset_peak_memory_stats()
-    result = mqa_logits_sm70(query, keys, scales, weights, lengths)
-    torch.cuda.synchronize()
-    peak = torch.cuda.max_memory_allocated() - live
-    score_bytes = rows * heads * history * 4
-    assert peak < 2 * score_bytes, peak
-    assert torch.equal(result, torch.full_like(result, 128 * heads))
+def _replay_matches_eager(graph, run, graph_outputs, state):
+    """Check both execution modes from identical cache state before one oracle."""
+    initial = [value.clone() for value in state]
+    eager_keys, eager_scales, eager_counts = run()
+    eager_state = [value.clone() for value in state]
+    for value, saved in zip(state, initial):
+        value.copy_(saved)
+    graph.replay()
+    keys, scales, counts = graph_outputs
+    assert torch.equal(counts, eager_counts)
+    valid = torch.arange(keys.shape[1], device=keys.device)[None, :] < counts[:, None]
+    assert torch.equal(keys[valid], eager_keys[valid])
+    assert torch.equal(scales[valid], eager_scales[valid])
+    for value, expected in zip(state, eager_state):
+        assert torch.equal(value, expected)
 
 
 @pytest.mark.parametrize("round_scale", [False, True])
@@ -230,12 +135,11 @@ def test_quantization_and_pool_graph_replay_use_new_inputs():
         assert torch.equal(k8.view(torch.uint8), expected_k.view(torch.uint8))
 
 
-@pytest.mark.parametrize("use_graph", [False, True])
 @pytest.mark.parametrize(
     "token_page_size,index_page_size", [(64, 64), (64, 16), (256, 64)]
 )
 def test_device_pool4_replays_lengths_requests_and_page_boundaries(
-    use_graph, token_page_size, index_page_size
+    token_page_size, index_page_size
 ):
     from sglang.kernels.ops.attention.dsa.sm70_pool4_decode import pool4_decode_sm70
 
@@ -285,10 +189,9 @@ def test_device_pool4_replays_lengths_requests_and_page_boundaries(
 
     for _ in range(3):
         run()
-    if use_graph:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual_keys, actual_scales, actual_pools = run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual_keys, actual_scales, actual_pools = run()
 
     for step in range(12):
         order = [1, 2, -1] if step % 2 == 0 else [2, 1, -1]
@@ -299,10 +202,12 @@ def test_device_pool4_replays_lengths_requests_and_page_boundaries(
         gates.normal_()
         reqs.copy_(torch.tensor(order, device="cuda"))
         lengths.copy_(torch.tensor(seqs, device="cuda", dtype=torch.int32))
-        if use_graph:
-            graph.replay()
-        else:
-            actual_keys, actual_scales, actual_pools = run()
+        _replay_matches_eager(
+            graph,
+            run,
+            (actual_keys, actual_scales, actual_pools),
+            (cache, tail_k, tail_g),
+        )
         for row, (req, length) in enumerate(zip(order, seqs)):
             if req < 0:
                 assert actual_pools[row] == 0
@@ -368,7 +273,6 @@ def test_device_pool4_replays_lengths_requests_and_page_boundaries(
 
 @pytest.mark.parametrize("num_draft_tokens", [2, 6, 8])
 @pytest.mark.parametrize("round_scale", [False, True])
-@pytest.mark.parametrize("use_graph", [False, True])
 @pytest.mark.parametrize("use_effective", [False, True])
 @pytest.mark.parametrize(
     "token_page_size,index_page_size", [(64, 64), (64, 16), (256, 64)]
@@ -376,7 +280,6 @@ def test_device_pool4_replays_lengths_requests_and_page_boundaries(
 def test_pool4_spec_chain_rejection_and_page_boundary(
     num_draft_tokens,
     round_scale,
-    use_graph,
     use_effective,
     token_page_size,
     index_page_size,
@@ -441,10 +344,9 @@ def test_pool4_spec_chain_rejection_and_page_boundary(
         )
 
     actual_keys, actual_scales, actual_pools = run()
-    if use_graph:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual_keys, actual_scales, actual_pools = run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual_keys, actual_scales, actual_pools = run()
     out_locations[:-n] = 1
     committed = {1: 254, 2: 1}
     for step in range(4):
@@ -501,10 +403,12 @@ def test_pool4_spec_chain_rejection_and_page_boundary(
                 reference_cache[
                     page, scale_offset + offset * 4 : scale_offset + (offset + 1) * 4
                 ] = scale.view(torch.uint8).flatten()
-        if use_graph:
-            graph.replay()
-        else:
-            actual_keys, actual_scales, actual_pools = run()
+        _replay_matches_eager(
+            graph,
+            run,
+            (actual_keys, actual_scales, actual_pools),
+            (cache, tail_k, tail_g),
+        )
         assert torch.equal(cache, reference_cache)
         assert torch.equal(tail_k, reference_k)
         assert torch.equal(tail_g, reference_g)
@@ -588,10 +492,6 @@ def test_prefill_cache_uses_compact_pooled_token_locations(
 @pytest.mark.parametrize("rows,capacity", [(1, 67), (3, 521), (4, 65601), (8, 521)])
 def test_decode_scoring_live_bounds_graph_refresh_and_fp64_reference(rows, capacity):
     """Tile skipping must preserve ragged causal rows, graph refresh and FP32 scores."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_decode import (
-        mqa_logits_decode_sm70,
-    )
-
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta Tensor Core index scoring")
     torch.manual_seed(749)
@@ -609,11 +509,11 @@ def test_decode_scoring_live_bounds_graph_refresh_and_fp64_reference(rows, capac
     weights = torch.randn(rows, 32, device="cuda") * 0.1 * query_scale.squeeze(-1)
     lengths = torch.full((rows,), min(capacity, 2051), device="cuda", dtype=torch.int32)
     inputs = (query, keys, scales, weights, lengths)
-    mqa_logits_decode_sm70(*inputs)
+    mqa_logits_sm70(*inputs)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = mqa_logits_decode_sm70(*inputs)
+        output = mqa_logits_sm70(*inputs)
     ptr = output.data_ptr()
     # Cross both sides of the tile boundary and the final reserved column.
     for pattern in (
@@ -629,7 +529,7 @@ def test_decode_scoring_live_bounds_graph_refresh_and_fp64_reference(rows, capac
         query.copy_(query.half().neg().to(query.dtype))
         saved = [x.clone() for x in inputs]
         graph.replay()
-        eager = mqa_logits_decode_sm70(*inputs)
+        eager = mqa_logits_sm70(*inputs)
         assert output.data_ptr() == ptr
         assert torch.equal(output.view(torch.int32), eager.view(torch.int32))
         q64, k64 = query.cpu().double(), keys.cpu().double()
@@ -652,9 +552,6 @@ def test_decode_scoring_live_bounds_graph_refresh_and_fp64_reference(rows, capac
 @pytest.mark.parametrize("capacity", [67, 262400])
 def test_pool4_live_gather_poisoned_future_and_shrinking_graph(capacity):
     """Reserved-context scratch is not initialized outside live pool counts."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_decode import (
-        mqa_logits_decode_sm70,
-    )
     from sglang.kernels.ops.attention.dsa.sm70_pool4_decode import pool4_decode_sm70
 
     if torch.cuda.get_device_capability() != (7, 0):
@@ -691,7 +588,7 @@ def test_pool4_live_gather_poisoned_future_and_shrinking_graph(capacity):
             lengths,
             token_page_size=256,
         )
-        logits = mqa_logits_decode_sm70(query, gathered, scales, weights, counts)
+        logits = mqa_logits_sm70(query, gathered, scales, weights, counts)
         return gathered, scales, counts, logits
 
     run()
@@ -739,10 +636,6 @@ def test_pool4_live_gather_poisoned_future_and_shrinking_graph(capacity):
 )
 def test_decode_scoring_rejects_unsafe_inputs(bad_input):
     """Contiguous storage-offset views can violate generated vector-load alignment."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_decode import (
-        mqa_logits_decode_sm70,
-    )
-
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta Tensor Core index scoring")
     query = torch.zeros(1, 32, 128, device="cuda", dtype=torch.float16)
@@ -761,7 +654,7 @@ def test_decode_scoring_rejects_unsafe_inputs(bad_input):
     else:
         lengths = lengths.long()
     with pytest.raises(ValueError):
-        mqa_logits_decode_sm70(query, keys, scales, weights, lengths)
+        mqa_logits_sm70(query, keys, scales, weights, lengths)
 
 
 @pytest.mark.parametrize(
@@ -769,10 +662,6 @@ def test_decode_scoring_rejects_unsafe_inputs(bad_input):
 )
 def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
     """Shared-bank addressing must preserve rows, causal tails and FP32 math."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_prefill import (
-        mqa_logits_prefill_sm70,
-    )
-
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta shared-history index scoring")
     torch.manual_seed(753)
@@ -789,7 +678,7 @@ def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
     lengths = torch.linspace(-1, capacity + 7, rows, device="cuda").int()
     values = (query, keys, scales, weights, lengths)
     saved = [x.clone() for x in values]
-    actual = mqa_logits_prefill_sm70(*values)
+    actual = mqa_logits_sm70(*values)
     assert actual.shape == (rows, capacity)
     if not rows or not capacity:
         return
@@ -808,10 +697,7 @@ def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
 
 def test_shared_prefill_scoring_changed_graph_and_output_canaries():
     """Replay must refresh shared keys/weights/causality without writing guards."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_prefill import (
-        _index_score_prefill_kernel,
-        mqa_logits_prefill_sm70,
-    )
+    from sglang.kernels.ops.attention.dsa.sm70_indexer_score import _index_score_kernel
 
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta shared-history index scoring")
@@ -823,12 +709,12 @@ def test_shared_prefill_scoring_changed_graph_and_output_canaries():
     lengths = torch.full((rows,), capacity, device="cuda", dtype=torch.int32)
     guard = torch.full((rows * capacity + 32,), 1234567.0, device="cuda")
     output = guard[16:-16].view(rows, capacity)
-    kernel = _index_score_prefill_kernel()
-    kernel(query, keys, scales, weights, lengths, output)
+    kernel = _index_score_kernel(True, None)
+    kernel(query, keys[None], scales[None], weights, lengths, output)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        kernel(query, keys, scales, weights, lengths, output)
+        kernel(query, keys[None], scales[None], weights, lengths, output)
     for pattern in (
         [0, 0, 0, 0, 0],
         [capacity, 0, 65, 1, capacity],
@@ -842,7 +728,7 @@ def test_shared_prefill_scoring_changed_graph_and_output_canaries():
         weights.mul_(-0.75)
         lengths.copy_(torch.tensor(pattern, device="cuda", dtype=torch.int32))
         graph.replay()
-        eager = mqa_logits_prefill_sm70(query, keys, scales, weights, lengths)
+        eager = mqa_logits_sm70(query, keys, scales, weights, lengths)
         assert torch.equal(output.view(torch.int32), eager.view(torch.int32))
         # Adjacent queries can have opposite causal limits; an odd last query
         # must not read its absent partner or inherit another row's reduction.
@@ -862,10 +748,6 @@ def test_shared_prefill_scoring_changed_graph_and_output_canaries():
 @pytest.mark.parametrize("bad", ["query_alignment", "key_alignment", "length_dtype"])
 def test_shared_prefill_scoring_rejects_unsafe_views(bad):
     """Vector-copy addresses and causal integer dtypes are kernel preconditions."""
-    from sglang.kernels.ops.attention.dsa.sm70_indexer_prefill import (
-        mqa_logits_prefill_sm70,
-    )
-
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta shared-history index scoring")
     query = torch.zeros(3, 32, 128, device="cuda", dtype=torch.float16)
@@ -884,7 +766,7 @@ def test_shared_prefill_scoring_rejects_unsafe_views(bad):
     else:
         lengths = lengths.long()
     with pytest.raises(ValueError):
-        mqa_logits_prefill_sm70(query, keys, scales, weights, lengths)
+        mqa_logits_sm70(query, keys, scales, weights, lengths)
 
 
 if __name__ == "__main__":

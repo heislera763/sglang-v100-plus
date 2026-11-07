@@ -152,39 +152,3 @@ def kpool_compress_sm70(
             enable_fp_fusion=False,
         )
     return quantized, scale
-
-
-def mqa_logits_sm70(
-    query: torch.Tensor,
-    keys: torch.Tensor,
-    key_scales: torch.Tensor,
-    weights: torch.Tensor,
-    lengths: torch.Tensor,
-):
-    if query.ndim != 3 or query.shape[-1] != 128 or keys.shape[-1] != 128:
-        raise ValueError("SM70 index scoring requires [tokens, heads, 128] queries")
-    tokens, heads, dim = query.shape
-    if weights.shape != (tokens, heads) or lengths.numel() != tokens:
-        raise ValueError("Indexer head weights and causal lengths must match queries")
-    if keys.ndim == 3:
-        if keys.shape[0] != tokens or key_scales.shape != keys.shape[:2]:
-            raise ValueError("Batched index keys/scales must match query rows")
-        dots = torch.bmm(query.half(), keys.transpose(1, 2), out_dtype=torch.float32)
-        # GEMM owns this private FP32 buffer; reuse it without changing the
-        # elementwise arithmetic or head-reduction order.
-        logits = dots.relu_().mul_(weights.float().unsqueeze(-1)).sum(1)
-        logits *= key_scales.float()
-        valid = (
-            torch.arange(keys.shape[1], device=query.device)[None, :] < lengths[:, None]
-        )
-        return logits.masked_fill(~valid, float("-inf"))
-    if keys.shape[0] == 0:
-        return torch.empty(tokens, 0, device=query.device, dtype=torch.float32)
-    dots = torch.mm(
-        query.half().reshape(-1, dim), keys.half().T, out_dtype=torch.float32
-    ).reshape(tokens, heads, -1)
-    # GEMM owns this private FP32 buffer; no caller input aliases it.
-    logits = dots.relu_().mul_(weights.float().unsqueeze(-1)).sum(1)
-    logits *= key_scales.float().reshape(1, -1)
-    valid = torch.arange(keys.shape[0], device=query.device)[None, :] < lengths[:, None]
-    return logits.masked_fill(~valid, float("-inf"))

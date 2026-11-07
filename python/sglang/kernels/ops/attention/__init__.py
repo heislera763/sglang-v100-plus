@@ -231,15 +231,11 @@ for _grp, _mod, _fn in [
 del _grp, _mod, _fn
 
 # Software-FP8 DSA primitives for the opt-in V100 runtime.
-for _fn in ("fp8_quantize_sm70", "kpool_compress_sm70", "mqa_logits_sm70"):
+for _fn in ("fp8_quantize_sm70", "kpool_compress_sm70"):
     register_kernel(
         KernelSpec(
             op=f"attention.{_fn}",
-            backend=(
-                KernelBackend.TORCH
-                if _fn == "mqa_logits_sm70"
-                else KernelBackend.TRITON
-            ),
+            backend=KernelBackend.TRITON,
             target=f"sglang.kernels.ops.attention.dsa.sm70_indexer:{_fn}",
             capabilities={CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))},
         )
@@ -248,18 +244,9 @@ del _fn
 
 register_kernel(
     KernelSpec(
-        op="attention.mqa_logits_prefill_sm70",
+        op="attention.mqa_logits_sm70",
         backend=KernelBackend.JIT,
-        target="sglang.kernels.ops.attention.dsa.sm70_indexer_prefill:mqa_logits_prefill_sm70",
-        capabilities={CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))},
-    )
-)
-
-register_kernel(
-    KernelSpec(
-        op="attention.mqa_logits_decode_sm70",
-        backend=KernelBackend.JIT,
-        target="sglang.kernels.ops.attention.dsa.sm70_indexer_decode:mqa_logits_decode_sm70",
+        target="sglang.kernels.ops.attention.dsa.sm70_indexer_score:mqa_logits_sm70",
         capabilities={CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))},
     )
 )
