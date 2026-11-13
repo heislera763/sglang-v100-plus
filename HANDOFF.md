@@ -20,7 +20,7 @@ The 262K/MTP3 PP2xTP4 attempt loaded the target and failed constructing the draf
 | Vision parameters per PP1 GPU | 215.61 MiB | 0 MiB | All four actual target parameter inventories; CPU/meta stage and encoder-only checks |
 | Collective-check resident memory per GPU | 941.38 MiB | 721.38 MiB | Eight ranks, eager and graph gathers, changed inputs, exact results |
 
-These component savings sum to about 3.31 GiB across eight GPUs. This is a component budget, with the communicator saving measured independently. The full model has not completed initialization with MTP.
+The directly measured parameter/metadata tensor savings sum to 1.59 GiB across eight GPUs. The communicator saving is an isolated measurement whose applicability depends on which transports each worker actually initializes. The earlier full-model audit showed an extra TP transport primarily on PP1. Whole-model transport savings remain pending because the MTP attempt stopped during weight construction.
 
 ## Configuration review
 
