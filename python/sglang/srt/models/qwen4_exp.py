@@ -2523,7 +2523,7 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 continue
             if "mtp" in name:
                 continue
-            if "visual" in name and self.language_model_only:
+            if "visual" in name and self.visual is None:
                 skipped_visual_count += 1
                 continue
             if "language_model" in name:
@@ -2696,8 +2696,8 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         if skipped_visual_count > 0:
             logger.info(
-                f"[language_model_only] Qwen4 load_weights: skipped "
-                f"{skipped_visual_count} visual weights"
+                f"Qwen4 load_weights: skipped {skipped_visual_count} visual weights "
+                "on a worker without the vision encoder"
             )
 
         for module in self.modules():

@@ -68,6 +68,9 @@
     "python/sglang/srt/models/dflash.py": "Permit an adapter to shard context-projection output columns with the original tensor interface and logical checkpoint shape validation.",
     "python/sglang/srt/distributed/device_communicators/pynccl.py": "Allow a per-communicator NCCL max-CTA bound, retaining default behavior. MiniMax quad/bridge communicators use four channels to bound their VRAM overhead.",
     "python/sglang/srt/configs/attention_execution.py": "Keep draft Triton execution width consistent with TP-sharded draft KV heads; the shared policy also drives unified draft KV planning.",
-    "python/sglang/kernels/ops/attention/dsa/sm70_indexer_score.py": "Unified Volta MMA learned-index scoring with shared-bank paired prefill and per-query decode, FP32 weighting/reduction, live causal bounds and FP16 Tensor Core operands."
+    "python/sglang/kernels/ops/attention/dsa/sm70_indexer_score.py": "Unified Volta MMA learned-index scoring with shared-bank paired prefill and per-query decode, FP32 weighting/reduction, live causal bounds and FP16 Tensor Core operands.",
+    "python/sglang/srt/models/qwen3_vl.py": "Keep the vision encoder on the first decoder PP stage while retaining encoder-only ownership.",
+    "python/sglang/srt/models/qwen4_exp.py": "Skip visual checkpoint tensors on PP workers without a vision encoder.",
+    "python/sglang/srt/eplb/expert_location.py": "Bound replica-map capacity by redundant expert slots while preserving placement-update and graph addresses."
   }
 }

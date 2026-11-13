@@ -94,7 +94,7 @@ class ExpertLocationMetadata:
 
     def __post_init__(self):
         num_layers_0, num_physical_experts_0 = self.physical_to_logical_map.shape
-        num_layers_1, num_logical_experts_0, num_physical_experts_1 = (
+        num_layers_1, num_logical_experts_0, replica_capacity = (
             self.logical_to_all_physical_map.shape
         )
         num_layers_2, num_logical_experts_1 = (
@@ -102,7 +102,7 @@ class ExpertLocationMetadata:
         )
         assert num_layers_0 == num_layers_1 == num_layers_2
         assert num_logical_experts_0 == num_logical_experts_1
-        assert num_physical_experts_0 == num_physical_experts_1
+        assert 0 < replica_capacity <= num_physical_experts_0
 
     # -------------------------------- construction ------------------------------------
 
@@ -276,14 +276,21 @@ class ExpertLocationMetadata:
 
         _, num_physical_experts = physical_to_logical_map.shape
 
-        logical_to_all_physical_map_padded = F.pad(
-            logical_to_all_physical_map,
-            (0, num_physical_experts - logical_to_all_physical_map.shape[-1]),
-            value=-1,
-        )
-
         logical_to_all_physical_map_num_valid = torch.count_nonzero(
             logical_to_all_physical_map != -1, dim=-1
+        )
+
+        # Keep capacity stable across placement updates and CUDA graph replay.
+        # With every logical expert present, one expert can own at most all
+        # redundant slots plus its mandatory slot. Missing-expert layouts keep
+        # the conservative capacity because that tighter bound does not apply.
+        replica_capacity = num_physical_experts
+        if torch.all(logical_to_all_physical_map_num_valid > 0).item():
+            replica_capacity -= logical_to_all_physical_map.shape[1] - 1
+        logical_to_all_physical_map_padded = F.pad(
+            logical_to_all_physical_map,
+            (0, replica_capacity - logical_to_all_physical_map.shape[-1]),
+            value=-1,
         )
 
         return ExpertLocationMetadata(
@@ -316,6 +323,18 @@ class ExpertLocationMetadata:
         other: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
+        replica_capacity = self.logical_to_all_physical_map.shape[-1]
+        layer_mask = torch.tensor(
+            [i in update_layer_ids for i in range(self.num_layers)]
+        )
+        selected_counts = other.logical_to_all_physical_map_num_valid[
+            layer_mask.to(other.logical_to_all_physical_map_num_valid.device)
+        ]
+        if torch.any(selected_counts > replica_capacity).item():
+            raise ValueError(
+                "Placement exceeds the existing replica-map capacity; "
+                "its captured allocation cannot grow during an update."
+            )
         for field in [
             "ep_size",
         ]:
@@ -333,10 +352,20 @@ class ExpertLocationMetadata:
             self_field = getattr(self, field)
             assert (other_field is not None) == (self_field is not None)
             if self_field is not None:
-                mask_update = torch.tensor(
-                    [i in update_layer_ids for i in range(self.num_layers)]
-                )
-                mask_update = mask_update.view(*([-1] + [1] * (self_field.dim() - 1)))
+                if (
+                    field
+                    in (
+                        "logical_to_all_physical_map",
+                        "logical_to_all_physical_map_cpu",
+                    )
+                    and other_field.shape[-1] != replica_capacity
+                ):
+                    other_field = F.pad(
+                        other_field,
+                        (0, replica_capacity - other_field.shape[-1]),
+                        value=-1,
+                    )
+                mask_update = layer_mask.view(*([-1] + [1] * (self_field.dim() - 1)))
                 mask_update = mask_update.to(self_field.device, non_blocking=True)
                 self_field[...] = torch.where(mask_update, other_field, self_field)
 

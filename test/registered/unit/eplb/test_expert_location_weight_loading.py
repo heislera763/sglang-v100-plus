@@ -166,6 +166,83 @@ def _scale_up_layout(num_logical, per_rank):
 
 
 class TestExpertLocationWeightLoading(CustomTestCase):
+    def test_replica_capacity_stays_bounded_across_placement_updates(self):
+        with get_context().override_server_args(ep_dispatch_algorithm="dynamic"):
+            for old, new, capacity in (
+                ([[0, 1, 2, 3]], [[3, 2, 1, 0]], 1),
+                ([[0, 1, 2, 3, 0, 1]], [[0, 1, 2, 3, 3, 3]], 3),
+                ([[0, 0, 2, 3]], [[0, 1, 2, 3]], 4),
+                (
+                    [[0, 1, 2, 3], [0, 1, 2, 3]],
+                    [[3, 2, 1, 0], [0, 0, 2, 3]],
+                    1,
+                ),
+            ):
+                with self.subTest(capacity=capacity):
+                    source = _metadata(
+                        old,
+                        ep_size=2,
+                        nnodes=1,
+                        moe_ep_rank=0,
+                        moe_a2a_backend="none",
+                    )
+                    target = _metadata(
+                        new,
+                        ep_size=2,
+                        nnodes=1,
+                        moe_ep_rank=0,
+                        moe_a2a_backend="none",
+                    )
+                    mapping = source.logical_to_all_physical_map
+                    address = mapping.data_ptr()
+                    self.assertEqual(mapping.shape, (len(old), 4, capacity))
+                    source.update(target, update_layer_ids=[0])
+                    self.assertEqual(mapping.data_ptr(), address)
+                    torch.testing.assert_close(
+                        mapping[0],
+                        torch.nn.functional.pad(
+                            target.logical_to_all_physical_map[0],
+                            (
+                                0,
+                                capacity - target.logical_to_all_physical_map.shape[-1],
+                            ),
+                            value=-1,
+                        ),
+                    )
+                    self.assertEqual(
+                        source.physical_to_logical_map.tolist(), [new[0], *old[1:]]
+                    )
+                    for expert in range(4):
+                        self.assertEqual(
+                            source.logical_to_all_physical(0, expert),
+                            [
+                                slot
+                                for slot, logical in enumerate(new[0])
+                                if logical == expert
+                            ],
+                        )
+
+            source = _metadata(
+                [[0, 1, 2, 3]],
+                ep_size=2,
+                nnodes=1,
+                moe_ep_rank=0,
+                moe_a2a_backend="none",
+            )
+            target = _metadata(
+                [[0, 0, 2, 3]],
+                ep_size=2,
+                nnodes=1,
+                moe_ep_rank=0,
+                moe_a2a_backend="none",
+            )
+            with self.assertRaisesRegex(ValueError, "replica-map capacity"):
+                source.update(target, update_layer_ids=[0])
+            self.assertEqual(source.physical_to_logical_map.tolist(), [[0, 1, 2, 3]])
+            self.assertEqual(
+                source.physical_to_logical_map_cpu.tolist(), [[0, 1, 2, 3]]
+            )
+
     def test_lookup_returns_exactly_the_slots_of_each_expert(self):
         rng = random.Random(0)
         cases = [

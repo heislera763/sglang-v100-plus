@@ -174,8 +174,10 @@ def all_reduce(original, group, value):
 
 
 def all_gather(original, group, output, value):
-    transport = _slot().get("transport")
-    if transport is not None and transport.group is group and value.is_cuda:
-        with transport.native.change_state(enable=True):
+    # Reuse the graph communicator for eager gathers on every SM70 model.
+    # A separate c10d NCCL communicator duplicates channel and peer buffers.
+    comm = group.get_available_pynccl_comm() if value.is_cuda else None
+    if comm is not None:
+        with comm.change_state(enable=True):
             return original(group, output, value)
     return original(group, output, value)
