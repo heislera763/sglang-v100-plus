@@ -95,7 +95,7 @@ def install():
         Qwen4ExpPinnedHostEmbedding,
         _gather_ple_embedding_from_pinned_kernel,
     )
-    from .qsa import QwenSparseAttnBackend, mqa_decode, project_qk
+    from .qsa import QwenSparseAttnBackend, mqa_decode, project_qk, scoring_dtype
 
     def legacy_dtype(original, model_config):
         if model_config.dtype != torch.float16:
@@ -373,6 +373,11 @@ def install():
         (
             "sglang.srt.layers.attention.qsa.qsa_indexer.QSAIndexer.project_qk",
             project_qk,
+            HookType.AROUND,
+        ),
+        (
+            "sglang.srt.layers.attention.qsa.mqa._scoring_dtype",
+            scoring_dtype,
             HookType.AROUND,
         ),
         (

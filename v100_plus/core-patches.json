@@ -18,6 +18,7 @@
     "python/sglang/srt/environ.py": "Typed SM70 optimization switches, HC prefill partitions, sampled verification graphs and strict V100 dispatch diagnostics.",
     "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py": "Dispatch supported SM70 K-pool/indexer decode operations.",
     "python/sglang/srt/layers/attention/dsa_backend.py": "Dispatch canonical SM70 FP16 sparse attention; skip Hopper-only MQA scheduler metadata on Volta. DeepGEMM is now lazy upstream.",
+    "python/sglang/srt/layers/attention/qsa/mqa.py": "Declare FP16 TileLang scoring operands; the SM70 plugin selects them for upstream request-relative QSA prefill.",
     "python/sglang/srt/layers/moe/fused_moe_triton/fused_marlin_moe.py": "Expose route-alignment selection so the plugin can match the native GEMM row tile; the default policy is unchanged.",
     "python/sglang/srt/managers/scheduler_pp_mixin.py": "Relay exact draft probabilities into sampled PP verification; cold rows fall back to target sampling.",
     "python/sglang/srt/managers/utils.py": "Carry proposal probabilities with the next PP verification tree.",

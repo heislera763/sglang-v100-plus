@@ -33,6 +33,7 @@ Pinned benchmark sources; sizes are weight-file totals, **not runtime VRAM**.
 | Checkpoint | Revision | Composition | Files |
 | --- | --- | --- | ---: |
 | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/236dfdf285828023ca3bcd3f37366c58a3469b13) | `236dfdf28582` | Official 128×128 block FP8, BF16 exclusions; FP8 PLE/MTP experts | 172.78 GiB |
+| [ukisai/Swift1.5-Qwen3.8-Flash-Next](https://huggingface.co/ukisai/Swift1.5-Qwen3.8-Flash-Next/tree/0bd4fe22431372cdad1979267d3ab45aa7e6150a) | `0bd4fe224313` | BF16 source, FP16 GPU execution, BF16 host n-gram table | 335.28 GiB |
 | [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4/tree/da920bb0b9f4a06727223a349e55468e38352348) | `da920bb0b9f4` | ModelOpt abs-max NVFP4; main shared experts remain BF16; FP8 KV metadata | 190.40 GiB |
 | [nvidia/GLM-5.3-Flash-FP4-Local](https://huggingface.co/nvidia/GLM-5.3-Flash-FP4-Local/tree/76348ddb2be2e35e39ecfc00e75dc07703f4f3d5) | `76348ddb2be2` | QAD mixed precision: CSF32-compressed NVFP4 expert scales, MXFP8 projections, block-FP8 shared experts and quantized vision/MTP | 165.33 GiB |
 | [MiniMaxAI/MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash/tree/2f33a8b9ae49ce7b51c994df97166a7fd059bc2e) | `2f33a8b9ae49` | NVFP4 routed experts, group32 MXFP8 projections, BF16 exclusions; bundled dense MXFP8 DSpark | 232.94 GiB +2.14 GiB draft |
@@ -443,6 +444,17 @@ Historical Qwen FP8, FP16-KV/MTP3 lab-sampled screens (T1/P.95/K20/xhigh,512outp
 These are separate from the current GLM T0 comparison and were not rerun here.
 Earlier intermediate results/rejected experiments are preserved in the
 [previous README](https://github.com/heislera763/sglang-v100-plus/blob/487bb909ace96ca067200d9b695b814b58af9152/README.md).
+
+November 13 Swift1.5 FP16 screen uses PP2×TP4/EP4, vision, FP16 KV/state,
+16K context and ordinary decoding. One coherent 7,984-token code prompt,
+32-output warmup and 256 measured T0 outputs with an empty prefix cache.
+Host memory is interleaved across NUMA nodes for the 95.37 GiB n-gram table;
+NCCL uses 1 MiB channel buffers and prefill chunks are 512 tokens.
+
+| Tokens/s | Swift1.5 FP16 |
+| --- | ---: |
+| Prefill | 2544 |
+| Generation | 46.4 |
 
 Qualification uses current Marlin and independent FP64 references without
 loosening established bounds (`rtol=.001, atol=.0002` where applicable), changing

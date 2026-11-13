@@ -111,6 +111,7 @@ def torch_qsa_mqa_decode(
 
 # TileLang dtype names of the scoring-kernel operands. The logits stay fp32.
 _TILELANG_DTYPES = {
+    torch.float16: "float16",
     torch.bfloat16: "bfloat16",
     torch.float8_e4m3fn: "float8_e4m3fn",
 }

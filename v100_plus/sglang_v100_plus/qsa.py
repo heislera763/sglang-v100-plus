@@ -12,6 +12,18 @@ from sglang.srt.runtime_context import get_schedule
 from .dispatch import reject_fallback
 
 
+def scoring_dtype(original, q, k):
+    # The relative-column prefill entry point uses this shared dtype selector.
+    # Volta MMA requires FP16 operands even when the checkpoint stores BF16.
+    if (
+        q.is_cuda
+        and q.dtype == k.dtype == torch.float16
+        and torch.cuda.get_device_capability(q.device) == (7, 0)
+    ):
+        return torch.float16
+    return original(q, k)
+
+
 class QwenSparseAttnBackend(BaseQSA):
     @staticmethod
     def _forward_sm70_dense_prefill(q, k, v, extend_lens, softmax_scale):
