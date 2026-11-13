@@ -446,15 +446,17 @@ Earlier intermediate results/rejected experiments are preserved in the
 [previous README](https://github.com/heislera763/sglang-v100-plus/blob/487bb909ace96ca067200d9b695b814b58af9152/README.md).
 
 November 13 Swift1.5 FP16 screen uses PP2×TP4/EP4, vision, FP16 KV/state,
-16K context and ordinary decoding. One coherent 7,984-token code prompt,
+32K context and ordinary decoding. One coherent 7,984-token code prompt,
 32-output warmup and 256 measured T0 outputs with an empty prefix cache.
 Host memory is interleaved across NUMA nodes for the 95.37 GiB n-gram table;
 NCCL uses 1 MiB channel buffers and prefill chunks are 512 tokens.
+A 32,704-input-token boundary request and a small-image check passed. An
+8.5K TP8/EP8 bring-up exhausted memory at first prefill after graph capture.
 
 | Tokens/s | Swift1.5 FP16 |
 | --- | ---: |
-| Prefill | 2544 |
-| Generation | 46.4 |
+| Prefill | 2809 |
+| Generation | 46.9 |
 
 Qualification uses current Marlin and independent FP64 references without
 loosening established bounds (`rtol=.001, atol=.0002` where applicable), changing
