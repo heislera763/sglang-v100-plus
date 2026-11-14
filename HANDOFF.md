@@ -1,44 +1,70 @@
-# Swift memory optimization
+# Swift FP16 memory experiment
 
-Target Swift1.5 Qwen3.8 Flash Next with vision, native MTP and 262144 context on eight V100 32 GiB GPUs. Preserve FP16 target/draft weights, KV and recurrent state during this pass. The owner excludes quantization and other lossy changes, accepting the existing BF16-to-FP16 conversion. Host offload is allowed only if necessary and measured fast.
+Target `ukisai/Swift1.5-Qwen3.8-Flash-Next` revision `0bd4fe22431372cdad1979267d3ab45aa7e6150a`, loaded from its BF16 checkpoint as FP16. The objective is one session with native MTP3, vision and 262144 context. Target/draft operands, KV, learned index and recurrent states retain their existing FP16 boundaries. Complete projection K reductions and existing attention selection are preserved.
 
-Base main/dev is 084527ce1. Work belongs on experimental-memory. Hosting stays stopped. Model checks must enable MTP. No host, network, hardware-policy or model-storage changes.
+Work is isolated on `experimental-memory`, based on main/dev `084527ce1`. The normal server remains stopped. All source changes belong to this fork, with captures and launchers under `~/.local/state/server-work/sglang-swift-fp16/memory-experimental`. Models, host configuration, networking and GPU policies were preserved.
 
-Start with launch configuration, unused PP-stage vision residency and expert-location metadata. Reconcile each reduction against the existing all-rank memory audit before expanding into HC or KV sharding. Preserve numerical operations and routing. Keep captures, launchers and benchmark tooling outside Git under the existing SGLang private state/workspace directories.
+## Implemented layout
 
-Acceptance is measured memory savings with targeted regression checks and an MTP-enabled model attempt at the requested context. Report prefill and decode whenever model throughput can be measured, and explicitly record capacity or correctness blockers. Avoid spending full model startups on changes whose measured budget cannot fit.
-
-Initial audit and per-GPU budgets are in ~/.local/state/server-work/sglang-swift-fp16/memory-audit. Current-layout projection is 33.07 GiB/GPU on PP0 and 35.09 GiB/GPU on PP1 before extra graph/activation workspace.
-
-## First-pass results
-
-The 262K/MTP3 PP2xTP4 attempt loaded the target and failed constructing the draft expert down bank. Its 400 MiB allocation exceeded the remaining 205–217 MiB of driver-free memory. KV allocation and inference were never reached. Prefill and decode throughput remain unmeasured for this configuration. All owned workers are stopped.
-
-| Change | Before | After | Evidence |
-| --- | --- | --- | --- |
-| Replica map per GPU | 96 MiB | 0.1875 MiB | Current target reports shape 48x512x1; GPU graph replay survives placement update |
-| Vision parameters per PP1 GPU | 215.61 MiB | 0 MiB | All four actual target parameter inventories; CPU/meta stage and encoder-only checks |
-| Collective-check resident memory per GPU | 941.38 MiB | 721.38 MiB | Eight ranks, eager and graph gathers, changed inputs, exact results |
-
-The directly measured parameter/metadata tensor savings sum to 1.59 GiB across eight GPUs. The communicator saving is an isolated measurement whose applicability depends on which transports each worker actually initializes. The earlier full-model audit showed an extra TP transport primarily on PP1. Whole-model transport savings remain pending because the MTP attempt stopped during weight construction.
-
-## Configuration review
-
-| Setting | Disposition |
+| Component | Placement and checks |
 | --- | --- |
-| Existing CPU image preprocessing | Keep. It already places preprocessing on CPU. Switching to PIL offers no identified worker-VRAM saving here. |
-| Existing FP16 KV/index/state and one-request pool sizes | Keep. Radix reuse, four state slots plus sentinel, and batch-one decode graphs remain useful. |
-| `PYTORCH_ALLOC_CONF=pinned_max_round_threshold_mb:1024` | Installed PyTorch 2.13 allocator and mapped-GPU-gather checks passed. Allocations above 1 GiB use exact requested capacity. Projected n-gram pinned RAM drops from 128 to 95.37 GiB. A full-checkpoint run with this setting remains pending. |
-| `NCCL_MAX_CTAS=2` | Capacity experiment only. Saved another 184 MiB/GPU in the collective check, while large gathers slowed. Model throughput needs validation before choosing this setting. |
-| `CUBLAS_WORKSPACE_CONFIG=:16:8` | Rejected. Saved 8 MiB per handle, slowed several GEMMs and changed their rounded outputs. |
-| Generic KV-sharding switch | Requires PD-prefill and other attention backends. Current QSA serving/MTP needs implementation work. |
+| HC down/up matrices | One full-weight owner per TP group, balanced across layers. Broadcast FP16 outputs and the native FP32 verification gates. Prefill retains quad-local token partitions and transfers one normalized shard at a time through existing broadcasts. |
+| Router, QSA index projection and PLE projections | One full-weight owner per NVLink quad. Preserve their original GPU operations and output placement. |
+| Main QSA KV | One physical FP16 cache per identical-KV-head consumer group, with CUDA VMM peer mappings. TP8 uses four consumers, PP2 uses two. |
+| Native MTP KV | Stripe physical pages across consumers behind the original contiguous address space. GPU ownership masks compose with caller validity masks. Prefix commits, cache moves and changed-input graph replay were checked. |
+| Compressed learned index | One FP16 physical store per layer and quad. The designated owner performs compression. Request-local pending rings retain their existing role. |
+| Input vocabulary and RoPE | Pinned host tables with GPU lookups. RoPE retains its complete FP32 table. Vision's RoPE is included because upstream expands that table to the text context too. Expert arithmetic and attention execute on GPUs. |
+| MTP embedding/head binding | Bind target-shared weights before KV budgeting to remove temporary duplicate residency from the budget. PP2 retains its required stage-local input table in host RAM. |
+| Existing first-pass changes | Compact expert-location metadata, omit the unused PP1 vision encoder and reuse PyNCCL for eager gathers. |
 
-The first model attempt predates the exact-size pinned-allocation setting. Its process group peaked near 239 GiB of cgroup-accounted host memory and 11.9 GiB of swap. The unit exited and its workers were cleaned up. Future loads should use the exact-size pinned allocation and retain NUMA interleaving.
+Select the separately registered `v100_memory` plugin through the existing `SGLANG_PLUGINS` setting. Default plugin discovery leaves this memory profile inactive. The profile validates SM70, full-FP16 Qwen4-Exp shapes, eight GPUs, TP8/EP8 or PP2xTP4/EP4, DCP1, one request, eager prefill and the supported memory layout.
 
-## Larger remaining work
+The new upstream-core surface is nine changed lines in the existing embedding operator. Runtime ownership, process groups, VMM lifetimes and model integration reside in one plugin module. The existing CPU memory tests and embedding tests contain the new regression cases. No new test files or checkpoint formats were added.
 
-The current layout still needs substantial memory recovery. Quad-local HC output sharding can keep each projection's full K reduction and existing FP16 boundaries. Down outputs would gather the low-rank vector, while up weights would shard hidden coordinates across all HC streams and gather the final hidden output. This avoids a new FP16 partial-product reduction. Its interaction with the existing token-sharded HC prefill needs explicit treatment.
+## Model confirmation
 
-Quad-local distributed QSA is the next KV candidate. Each rank would retain a stripe of FP16 KV, gather the quad's query heads, compute local FP32 partial outputs/LSE, and merge into the original query-head shards. Sharing queries and attention results avoids gathering entire historical KV prefixes. MTP cache movement, prefix reuse, causal masks and graph replay need coverage. Implementation remains pending.
+One coherent 7984-token prompt, a 32-output warmup, a fresh uncached 256-output request and prefix reuse. Throughput requests use temperature 0 and seed 531. A separate 64-output temperature-1, top-p .95, top-k 20 request checks sampled execution. Image checks use a 224x224 synthetic image. Profiling stays outside timed requests.
 
-Private commands, allocation inventories, raw results and logs are under `~/.local/state/server-work/sglang-swift-fp16/memory-experimental`. Main/dev remain at the base revision. The experimental branch carries the source work and this handoff.
+| Layout | Context allocated | Prefill tokens/s | Generation tokens/s | Draft acceptance |
+| --- | --- | --- | --- | --- |
+| TP8, final broadcasts, chunk256 | 262144 | 661.2 | 51.2 | 66.3% |
+| PP2xTP4, final broadcasts, chunk256 | 131072 | 1159.8 | 36.5 | 45.0% |
+
+Before the final prefill changes, TP8 at 262144 with chunk128 measured 367.7 prefill and 42.7 generation tokens/s, with 51.2% acceptance. Changing prefill partitioning/chunking changes rounded activations and generated trajectories. Most of the generation-throughput increase follows the changed acceptance. The execution-cycle proxy improves about 2%, so these numbers do not establish a 20% faster decoder.
+
+The earlier PP2 chunk256 screen measured 1225.2 prefill and 42.6 generation tokens/s, with 63.6% acceptance. Final prefill is 5.3% lower in this screen. Its generation-cycle proxy improves about 6% while acceptance decreases. Across fresh PP2 processes the continuations diverge after output token111. Within each final process, the warmup token IDs match the measured prefix and the prefix-reuse output exactly. These screens include trajectory and acceptance variation.
+
+## Memory accountability and limits
+
+TP8's final cache/index physical allocations total 7.059 GiB including VMM page rounding, about 20.59 GiB below consumer-replicated storage at the same capacity. HC ownership removes 8.545 GiB of duplicated down/up weights across eight GPUs.
+
+The final TP8 snapshot averages 29997.04 MiB target parameters, 646.26 MiB unique draft parameters, 903.50 MiB physical KV/index pages, 54 MiB verification state and 33.75 MiB live/prefix GDN state per GPU. Driver-free memory averages 145.75 MiB. The per-serial ledgers reconcile every physical byte through named allocator blocks, unused allocator reservation, physical VMM pages, driver reservation and free framebuffer. About 584.88 MiB/GPU of CUDA/NCCL allocations remain jointly accounted outside Torch and the cache VMM. Their individual internal owners are unexposed in this run.
+
+The existing host N-gram table now reserves its actual 95.37 GiB instead of 128 GiB through exact-size large pinned allocations. Input/RoPE host tables add their own smaller pinned allocations.
+
+PP2's 262K attempt failed during budget validation. Its first-stage GPUs had only 723–751 MiB free after weight loading, while the other stage had about 1990 MiB. Main-cache backing alone requires roughly 816 MiB on the heaviest first-stage ranks before GDN, graph and activation workspace. Moving one layer transfers about 1.2 GiB of expert parameters per GPU, so the retained 25/23 split leaves substantial last-stage slack. PP synchronization also conservatively pairs global minimum free memory with each stage's cost. That underestimates the exact ceiling, while 262K still exceeds the physical first-stage budget. 131K is the tested PP2 size.
+
+262K pool allocation and near8K inference passed on TP8. Filling the complete 262K context and large-image workloads remain unverified. There is little runtime slack at this capacity.
+
+## Launch profile
+
+| Setting | Value and reason |
+| --- | --- |
+| GPU order | `0,3,1,2,5,6,4,7`, consecutive NVLink quads |
+| Precision | FP16 model/KV/index/state, original FP32 RoPE |
+| MTP | EAGLE native head, steps3, top-k1, draft tokens4, classical rejection sampling |
+| Pool capacity | Context plus128 tokens, page64, one request, four Mamba slots |
+| Runtime | `mem_fraction_static=.997`, eager prefill chunk256, decode graph batch1, overlap disabled, CPU image preprocessing and vision SDPA |
+| Communication | Reused PyNCCL, custom all-reduce disabled, `NCCL_MAX_CTAS=1`, `NCCL_BUFFSIZE=1048576`, P2P level PHB and NVLS disabled |
+| Allocator | `expandable_segments:True,pinned_max_round_threshold_mb:1024` |
+| Other | Strict V100 dispatch, HC token partitioning, NUMA-interleaved host allocations and zero multimodal embedding-cache reservation |
+
+An initial point-to-point HC prefill prototype allocated another 8 MiB NCCL peer buffer during execution and failed under the tight TP8 budget. Existing broadcasts replace those sends/receives, and their transport setup runs before KV sizing. The larger prefill chunk then passed actual model inference.
+
+## Verification and handback
+
+63 CPU tests and 138 subtests passed with CUDA hidden. Eight-rank TP8 and PP2 checks passed bit-exact HC mix/combine, token tails, projection ownership, changed-input CUDA graphs, VMM KV writes/moves, compressed-index writes, rank-distinct ownership canaries and changing prefix-commit lengths. Seven FP16 embedding cases passed, including changed-ID/weight replay, vocabulary padding, invalid IDs and int32/int64 inputs. Ruff and diff-whitespace checks passed.
+
+Raw requests, per-GPU allocation snapshots, source captures, commands and physical ledgers remain in the private experiment directory. Final model evidence is in `tp8-262k-final` and `pp2-131k-final`. Earlier directories document rejected layouts and capacity failures. No permanent diagnostic instrumentation was added.
+
+All owned model and test workers are stopped. Hosting remains down, and main/dev retain the base revision. Transient user units managed the model checks. The task branch contains the experimental source and this handoff. Reverting the experiment uses the ordinary `v100_plus` plugin and the base branch. Live launchers and deployed service definitions were preserved.

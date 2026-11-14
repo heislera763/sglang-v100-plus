@@ -12,6 +12,11 @@ def register():
             "strict dispatch requires the V100 plugin to be active (SGLANG_V100_PLUS=1)",
         )
         return
-    from .runtime import install
+    from sglang.srt.plugins.hook_registry import HookRegistry
 
-    install()
+    from . import runtime
+
+    required = getattr(runtime, "REQUIRED_HOOKS", None)
+    if required and required.issubset(HookRegistry._hooks):
+        return
+    runtime.install()

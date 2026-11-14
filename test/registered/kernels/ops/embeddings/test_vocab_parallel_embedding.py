@@ -94,6 +94,31 @@ def test_vocab_parallel_embedding_strided_weight():
     _run_case(input_ids, weight, cfg)
 
 
+def test_pinned_vocab_embedding_replays_changed_ids_and_weights():
+    cfg = dict(
+        org_vocab_start_index=10,
+        org_vocab_end_index=18,
+        num_org_vocab_padding=4,
+        added_vocab_start_index=100,
+        added_vocab_end_index=103,
+    )
+    weight = torch.empty((16, 300), dtype=torch.float16, pin_memory=True)[:, :257]
+    weight.normal_()
+    ids = torch.tensor([9, 10, 17, 18, 100, 102], dtype=torch.int64, device="cuda")
+    for _ in range(3):
+        vocab_parallel_embedding(ids, weight, **cfg)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = vocab_parallel_embedding(ids, weight, **cfg)
+    ids.copy_(torch.tensor([102, -1, 100, 17, 10, 2**30], device="cuda"))
+    weight.add_(1)
+    graph.replay()
+    torch.cuda.synchronize()
+    expected = _reference_embedding(ids, weight.cuda(), cfg)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    assert output.device == ids.device
+
+
 def test_vocab_parallel_embedding_empty_input():
     cfg = dict(
         org_vocab_start_index=0,

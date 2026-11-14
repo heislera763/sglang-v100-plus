@@ -10,6 +10,7 @@ dependencies = ["sglang", "sglang-kernel", "pytest", "scikit-build-core", "cmake
 
 [project.entry-points."sglang.srt.plugins"]
 v100_plus = "sglang_v100_plus:register"
+v100_memory = "sglang_v100_plus.memory:register"
 
 [tool.setuptools.packages.find]
 where = ["v100_plus"]

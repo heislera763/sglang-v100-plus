@@ -1,5 +1,6 @@
 {
   "upstream_paths": {
+    "python/sglang/kernels/ops/embeddings/vocab_parallel_embedding.py": "Permit mapped pinned-host embedding weights in the existing GPU gather operator, preserving vocabulary masking, strides and output precision for the explicit FP16 memory plugin.",
     "python/sglang/srt/managers/schedule_batch.py": "Permit a backend to coarsen prefill checkpoint placement while preserving default grid validation and tracking logic; SM70 aligns FP16 reuse with prefill persistence boundaries.",
     "python/sglang/kernels/ops/attention/__init__.py": "Register lazy SM70 canonical attention, windowed GQA, sparse indexer and fused K-pool decode operators.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer.py": "Volta sparse-attention indexer with FP16 cache support.",

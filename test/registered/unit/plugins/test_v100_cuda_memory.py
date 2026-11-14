@@ -24,6 +24,84 @@ with patch.object(
     sys, "path", [str(Path(__file__).resolve().parents[4] / "v100_plus"), *sys.path]
 ):
     from sglang_v100_plus import cuda_memory
+    from sglang_v100_plus import memory as shared_memory
+
+
+class TestSharedGPUPlacement(CustomTestCase):
+    def test_stripes_cover_every_byte_once_and_keep_projection_k_intact(self):
+        import torch
+
+        for nbytes in (1, 33, (2 << 20) + 1, (128 << 20) + 65536):
+            for owners in ((3,), (0, 1), (0, 1, 2, 3)):
+                with self.subTest(nbytes=nbytes, owners=owners):
+                    layout = shared_memory.allocation_layout(nbytes, 2 << 20, owners)
+                    self.assertEqual(tuple(owner for owner, _, _ in layout), owners)
+                    self.assertGreaterEqual(sum(size for _, _, size in layout), nbytes)
+                    boundaries = {0, nbytes - 1}
+                    for _, offset, size in layout:
+                        self.assertEqual(offset % (2 << 20), 0)
+                        self.assertEqual(size % (2 << 20), 0)
+                        boundaries.update((offset - 1, offset, offset + size - 1))
+                    for byte in boundaries:
+                        if 0 <= byte < nbytes:
+                            self.assertEqual(
+                                sum(
+                                    offset <= byte < offset + size
+                                    for _, offset, size in layout
+                                ),
+                                1,
+                            )
+        with self.assertRaises(ValueError):
+            shared_memory.allocation_layout(64, 64, (0, 0))
+        module = torch.nn.Linear(8, 4, bias=False, dtype=torch.float16)
+        shared_memory._discard_replica(module)
+        self.assertEqual(module.weight.numel(), 0)
+        module.weight.weight_loader(module.weight, torch.ones(4, 8))
+        with self.assertRaises(ValueError):
+            module.weight.weight_loader(module.weight, torch.ones(8, 4))
+
+    def test_cache_budget_includes_native_mtp_and_vmm_padding(self):
+        config = SimpleNamespace(full_attention_layer_ids=list(range(3, 48, 4)))
+        for consumers, end_layer, hosts_draft, expected_cell, expected_padding in (
+            (4, 48, True, 3584, 24 << 20),
+            (2, 24, True, 3776, 22 << 20),
+            (2, 24, False, 3200, 22 << 20),
+        ):
+            with self.subTest(consumers=consumers):
+                result = SimpleNamespace(_fixed_overhead_bytes=0)
+                configurator = SimpleNamespace(
+                    is_draft_worker=False,
+                    model_config=None,
+                    layer_info=SimpleNamespace(start_layer=0, end_layer=end_layer),
+                    spec_algorithm=SimpleNamespace(is_eagle=lambda: True),
+                )
+                with (
+                    patch.object(
+                        shared_memory,
+                        "_groups",
+                        return_value=(
+                            SimpleNamespace(world_size=4),
+                            SimpleNamespace(world_size=consumers),
+                        ),
+                    ),
+                    patch(
+                        "sglang.srt.configs.hybrid_arch.mambaish_config",
+                        return_value=config,
+                    ),
+                    patch.object(
+                        shared_memory,
+                        "get_parallel",
+                        return_value=SimpleNamespace(
+                            pp_size=4 // consumers,
+                            pp_group=SimpleNamespace(is_last_rank=hosts_draft),
+                        ),
+                    ),
+                ):
+                    shared_memory._initialize_budget(
+                        lambda *_: None, result, configurator
+                    )
+                self.assertEqual(result._cell_size, expected_cell)
+                self.assertEqual(result._fixed_overhead_bytes, expected_padding)
 
 
 class _Allocator:

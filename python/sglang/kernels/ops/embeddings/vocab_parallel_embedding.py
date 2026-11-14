@@ -35,6 +35,7 @@ def _vocab_parallel_embedding_kernel(
         token < added_vocab_end_index
     )
     valid = org_vocab_mask | added_vocab_mask
+    weight_ptr = weight_ptr.to(tl.pointer_type(out_ptr.dtype.element_ty))
 
     added_offset = (
         added_vocab_start_index
@@ -65,13 +66,15 @@ def vocab_parallel_embedding(
     assert input_.is_cuda
     assert input_.is_contiguous()
     assert input_.dtype in (torch.int32, torch.int64)
-    assert weight.is_cuda
+    assert weight.is_cuda or (weight.device.type == "cpu" and weight.is_pinned())
     assert weight.ndim == 2
     assert weight.stride(1) == 1
 
     hidden_dim = weight.shape[1]
     output = torch.empty(
-        (*input_.shape, hidden_dim), dtype=weight.dtype, device=weight.device
+        (*input_.shape, hidden_dim),
+        dtype=weight.dtype,
+        device=weight.device if weight.is_cuda else input_.device,
     )
     n_tokens = input_.numel()
     if n_tokens == 0:
@@ -81,7 +84,7 @@ def vocab_parallel_embedding(
     grid = (n_tokens, triton.cdiv(hidden_dim, block_h))
     _vocab_parallel_embedding_kernel[grid](
         input_,
-        weight,
+        weight if weight.is_cuda else weight.data_ptr(),
         output,
         hidden_dim,
         weight.stride(0),

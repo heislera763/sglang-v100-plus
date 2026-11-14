@@ -16,7 +16,6 @@ def fp16_store_supported(pool, key, value, k_scale, v_scale, dcp_kv_mask):
         and pool.kv_cache_layout == "nhd"
         and not pool.is_quantized_kv_cache
         and not pool.use_hnd
-        and dcp_kv_mask is None
         and key.shape[0] == value.shape[0]
         and key.shape[1] * key.shape[2] == pool.row_dim
         and value.shape[1] * value.shape[2] == pool.v_row_dim
@@ -26,6 +25,15 @@ def fp16_store_supported(pool, key, value, k_scale, v_scale, dcp_kv_mask):
         and torch.cuda.get_device_capability(key.device) == (7, 0)
     ):
         return False
+    if dcp_kv_mask is not None:
+        # The upstream masked writer is a direct Triton copy on SM70. Its
+        # ownership mask is replay-time device data, with no indexed fallback.
+        return (
+            dcp_kv_mask.device == key.device
+            and dcp_kv_mask.dtype == torch.bool
+            and dcp_kv_mask.shape == (key.shape[0],)
+            and dcp_kv_mask.is_contiguous()
+        )
     from sglang.kernels.ops.kvcache.kvcache import can_use_store_cache
 
     # Quantized draft projections may attach descale parameters even when
