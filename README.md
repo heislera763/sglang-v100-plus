@@ -33,7 +33,6 @@ Pinned benchmark sources; sizes are weight-file totals, **not runtime VRAM**.
 | Checkpoint | Revision | Composition | Files |
 | --- | --- | --- | ---: |
 | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/236dfdf285828023ca3bcd3f37366c58a3469b13) | `236dfdf28582` | Official 128×128 block FP8, BF16 exclusions; FP8 PLE/MTP experts | 172.78 GiB |
-| [ukisai/Swift1.5-Qwen3.8-Flash-Next](https://huggingface.co/ukisai/Swift1.5-Qwen3.8-Flash-Next/tree/0bd4fe22431372cdad1979267d3ab45aa7e6150a) | `0bd4fe224313` | BF16 source, FP16 GPU execution, BF16 host n-gram table | 335.28 GiB |
 | [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4/tree/da920bb0b9f4a06727223a349e55468e38352348) | `da920bb0b9f4` | ModelOpt abs-max NVFP4; main shared experts remain BF16; FP8 KV metadata | 190.40 GiB |
 | [nvidia/GLM-5.3-Flash-FP4-Local](https://huggingface.co/nvidia/GLM-5.3-Flash-FP4-Local/tree/76348ddb2be2e35e39ecfc00e75dc07703f4f3d5) | `76348ddb2be2` | QAD mixed precision: CSF32-compressed NVFP4 expert scales, MXFP8 projections, block-FP8 shared experts and quantized vision/MTP | 165.33 GiB |
 | [MiniMaxAI/MiniMax-M3.1-Flash](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash/tree/2f33a8b9ae49ce7b51c994df97166a7fd059bc2e) | `2f33a8b9ae49` | NVFP4 routed experts, group32 MXFP8 projections, BF16 exclusions; bundled dense MXFP8 DSpark | 232.94 GiB +2.14 GiB draft |
@@ -148,31 +147,37 @@ copy on text/tool fixtures. MTP3 means three draft steps plus a target/bonus
 position, with one linear branch and rejection sampling. Deployment units,
 launch wrappers, captures and benchmark clients are intentionally outside Git.
 
-Qwen FP8 TP4×PP2/EP4, ordinary decoding, thinking enabled. This reference keeps
-radix reuse disabled, as in its recorded uncached performance screens:
+Qwen FP8 TP4×PP2/EP4 with MTP3, vision, native 262K context and prefix reuse.
+This profile passed near-8K text, image and repeated-request checks. Full 262K
+prefix filling remains unqualified.
 
 ```bash
-export SGLANG_PP_LAYER_PARTITION=24,24 SGLANG_OPT_SM70_HC_PREFILL_SP=1 SGLANG_ENABLE_METADATA_GLUE_GRAPH=1
+export SGLANG_PP_LAYER_PARTITION=24,24 SGLANG_ENABLE_PP_SPEC=1
+export SGLANG_OPT_SM70_HC_PREFILL_SP=1 SGLANG_ENABLE_METADATA_GLUE_GRAPH=1
+export SGLANG_OPT_SM70_SPEC_SAMPLE_GRAPH=1
 unset NCCL_TUNER_PLUGIN
 python -m sglang_v100_plus \
   --model-path "$HOME/models/sglang/Qwen-Qwen3.8-Flash-Next-FP8" --served-model-name qwen3.8-flash-next \
   --host 0.0.0.0 --port 9000 --api-key test-only --dtype float16 --trust-remote-code \
-  --quantization fp8 --json-model-override-args '{"language_model_only":true}' \
-  --tensor-parallel-size 4 --pipeline-parallel-size 2 --expert-parallel-size 4 \
+  --quantization fp8 --tensor-parallel-size 4 --pipeline-parallel-size 2 --expert-parallel-size 4 \
   --context-length 262144 --max-total-tokens 262272 --max-running-requests 1 \
   --chunked-prefill-size 4352 --attention-backend triton --mm-attention-backend sdpa \
+  --image-processor-backend pil \
   --linear-attn-prefill-backend tilelang_v100 --linear-attn-decode-backend triton \
   --page-size 64 --kv-cache-dtype auto --qsa-indexer-dtype float16 --mamba-ssm-dtype float16 \
-  --ple-offload-embedding --mamba-radix-cache-strategy extra_buffer --disable-radix-cache \
+  --ple-offload-embedding --mamba-radix-cache-strategy extra_buffer --max-mamba-cache-size 4 \
   --disable-overlap-schedule --disable-prefill-cuda-graph --cuda-graph-backend-decode full --cuda-graph-bs-decode 1 \
+  --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4 --speculative-use-rejection-sampling \
   --moe-runner-backend marlin --sampling-backend pytorch --reasoning-parser auto --tool-call-parser auto \
   --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}' \
   --preferred-sampling-params '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"frequency_penalty":0.0,"repetition_penalty":1.0}'
 ```
 
-Qwen TP8 uses TP8/EP8; omit PP and unset `SGLANG_PP_LAYER_PARTITION`/metadata flag.
-For Qwen MTP3 add the shared speculative flags shown for GLM, omitting the explicit
-GLM draft path/quantization; PP2 additionally needs `SGLANG_ENABLE_PP_SPEC=1`.
+TP8 uses TP8/EP8, omits PP and unsets `SGLANG_PP_LAYER_PARTITION` and
+`SGLANG_ENABLE_PP_SPEC`. Its measured profile uses the quad NCCL tuner above.
+The ordinary `v100_plus` plugin retains compact expert-location maps and loads
+vision on its owning pipeline stage. Full-FP16 weight/cache sharing stays experimental.
 Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#api-usage),
 [Z.ai](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes).
 
@@ -235,7 +240,7 @@ the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
 
 MiniMax M3.1 screen (2026-10-31): TP8/EP1, bundled DSpark/8 verification positions,
 10K context, FP16 main/index/draft KV and vision, chunk1024, one request, strict
-dispatch. Three coherent near8K prompts, 32-token warmup and 256 T0/seed531 outputs;
+dispatch. Three coherent near-8K prompts, 32-token warmup and 256 T0/seed531 outputs;
 cache flushed per request, profiling excluded. These are preliminary local rates.
 
 | Category | Prefill tokens/s | Generation tokens/s | Draft acceptance |
@@ -298,7 +303,7 @@ DSpark at 10K averaged 829/46.0 on these same short prompts.
 These predate the transport update and use different prompt/capacity settings;
 Radix's loadability is not a claim of working speculation.
 
-Upstream integration screen (2026-10-28), same near8K/256-output profile below:
+Upstream integration screen (2026-10-28), same near-8K/256-output profile below:
 
 | Tokens/s, category mean | Before | After |
 | --- | ---: | ---: |
@@ -313,7 +318,7 @@ new sampling/checkpoint arguments; no new full-context qualification is claimed.
 
 Routed GEMM screen (2026-10-27): FP4-Local/own MTP3/TP8/DCP4/524K,
 FP16 KV/state and vision, with both NVLink quads fully connected and all PCIe
-links at Gen3x8. Same three near8K prompts, 32-token warmup, 256 T0/seed531
+links at Gen3x8. Same three near-8K prompts, 32-token warmup, 256 T0/seed531
 outputs; the compatible recorded control is reused.
 
 | Tokens/s, category mean | Before | After |
@@ -376,7 +381,7 @@ or extra cold model starts were added.
 
 Higher MTP depths are supported: the [upstream GLM preset](https://github.com/sgl-project/sglang/blob/0d6b283d7e6ac79edc10b2ca788f309e972f527b/docs/src/snippets/configs/zai-org/glm-5.3-flash.jsx)
 uses five steps, one branch and six verification slots, repeatedly using the
-checkpoint's single MTP head. Current near8K/256-output/T0 results:
+checkpoint's single MTP head. Current near-8K/256-output/T0 results:
 
 | Tokens/s, category mean | Before | After |
 | --- | ---: | ---: |
@@ -398,7 +403,7 @@ Indexer/routed dispatch for wider verification still needs separate cost attribu
 DFlash2 block8's FA0.2.6 screen added native windowed FA and packed FP8 target
 projections through eight rows; it predates the wider target split schedule and
 has not been rerun. Same FP4-Local target/TP8/DCP4/524K, FP16 draft/KV/state,
-near8K inputs and256 outputs at T0; the compatible baseline is reused:
+near-8K inputs and256 outputs at T0; the compatible baseline is reused:
 
 | Tokens/s, DFlash2 | Before | After |
 | --- | ---: | ---: |
@@ -434,29 +439,26 @@ about8K inputs,32-output warmup and256 measured outputs. Deep tests grow one rea
 prefix to204800/409600 tokens, then process8267new tokens and128outputs; private
 baseline/candidate share identical weights, state, prefix and process.
 
-Historical Qwen FP8, FP16-KV/MTP3 lab-sampled screens (T1/P.95/K20/xhigh,512outputs):
+November 15 Qwen FP8/MTP3, FP16 KV/index/state, T1/P.95/K20/xhigh,
+64-output warmups and 512 sampled outputs per coherent near-8K category.
+Values are arithmetic means across coding, writing and document analysis.
 
-| Tokens/s | TP8/EP8 | TP4×PP2/EP4 |
-| --- | ---: | ---: |
-| Prefill | 4831 | 7588 |
-| Generation | 79.4 | 72.5 |
+| Tokens/s | TP8, text 12K | PP2×TP4, text 12K | TP8, vision 262K + reuse | PP2×TP4, vision 262K + reuse |
+| --- | ---: | ---: | ---: | ---: |
+| Prefill | 4840 | 7813 | 4503 | 7119 |
+| Generation | 76.5 | 62.7 | 76.8 | 60.3 |
 
-These are separate from the current GLM T0 comparison and were not rerun here.
-Earlier intermediate results/rejected experiments are preserved in the
+All measured text requests have an empty prefix cache. The 262K profiles also
+passed a separate cached-prefix request and a 224px image check. Allocation
+leaves about 10 GiB/GPU free at readiness on TP8 and 11–12 GiB on PP2, before
+request workspace. These screens qualify allocation and short inference.
+The former 4831/79.4 TP8 and 7588/72.5 PP2 figures used **FP8 E5M2 KV** according
+to their archived settings/allocation logs. Their previous FP16-KV label was
+incorrect. They have a different precision baseline from the current FP16 runs.
+The experimental eager-gather communicator reuse was excluded after its PP2
+T0 cycle time increased about 8%, while sampled cycle time stayed flat.
+Earlier experiments remain in the
 [previous README](https://github.com/heislera763/sglang-v100-plus/blob/487bb909ace96ca067200d9b695b814b58af9152/README.md).
-
-November 13 Swift1.5 FP16 screen uses PP2×TP4/EP4, vision, FP16 KV/state,
-32K context and ordinary decoding. One coherent 7,984-token code prompt,
-32-output warmup and 256 measured T0 outputs with an empty prefix cache.
-Host memory is interleaved across NUMA nodes for the 95.37 GiB n-gram table;
-NCCL uses 1 MiB channel buffers and prefill chunks are 512 tokens.
-A 32,704-input-token boundary request and a small-image check passed. An
-8.5K TP8/EP8 bring-up exhausted memory at first prefill after graph capture.
-
-| Tokens/s | Swift1.5 FP16 |
-| --- | ---: |
-| Prefill | 2809 |
-| Generation | 46.9 |
 
 Qualification uses current Marlin and independent FP64 references without
 loosening established bounds (`rtol=.001, atol=.0002` where applicable), changing
