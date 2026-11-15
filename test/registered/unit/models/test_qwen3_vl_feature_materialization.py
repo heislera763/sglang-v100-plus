@@ -8,6 +8,8 @@ from unittest.mock import Mock, patch
 import torch
 
 from sglang.srt.managers.req_types import MultimodalDataItem, MultimodalInputs
+from sglang.srt.configs.qwen3_vl import Qwen3VLConfig
+from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from sglang.srt.multimodal.modality import Modality
 from sglang.srt.multimodal.processors.qwen_vl import QwenVLImageProcessor
@@ -17,7 +19,7 @@ from sglang.srt.multimodal.transport.cuda_ipc import (
     DEFER_CUDA_IPC_FEATURE_RECONSTRUCTION_KEY,
     CudaIpcTensorTransportProxy,
 )
-from sglang.srt.runtime_context import get_context
+from sglang.srt.runtime_context import get_context, get_parallel
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -38,6 +40,11 @@ class _RecordingVisual:
         return pixel_values
 
 
+class _EmptyLanguageModel(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+
 class TestQwen3VLFeatureMaterialization(CustomTestCase):
     def setUp(self):
         # The transport decision is read from the `mm` bag.
@@ -47,6 +54,48 @@ class TestQwen3VLFeatureMaterialization(CustomTestCase):
         reset_context()
         self.addCleanup(reset_context)
         publish(ServerArgs(model_path="dummy"), role="test")
+
+    def test_pipeline_stage_owns_only_its_vision_parameters(self):
+        for rank, encoder_only in ((0, False), (1, False), (1, True)):
+            with self.subTest(rank=rank, encoder_only=encoder_only):
+                config = Qwen3VLConfig(
+                    text_config={"vocab_size": 64, "hidden_size": 32},
+                    vision_config={
+                        "hidden_size": 32,
+                        "out_hidden_size": 32,
+                        "intermediate_size": 64,
+                        "num_heads": 4,
+                        "depth": 1,
+                        "num_position_embeddings": 16,
+                        "deepstack_visual_indexes": [],
+                    },
+                    encoder_only=encoder_only,
+                )
+                group = GroupCoordinator.__new__(GroupCoordinator)
+                group.rank = group.rank_in_group = rank
+                group.world_size = 2
+                group.ranks = [0, 1]
+                with (
+                    get_parallel().override(
+                        pp_group=group,
+                        pp_size=2,
+                        pp_rank=rank,
+                        tp_rank=0,
+                        attn_tp_rank=0,
+                    ),
+                    patch(
+                        "sglang.srt.models.qwen3_vl.get_rope",
+                        return_value=torch.nn.Identity(),
+                    ),
+                    torch.device("meta"),
+                ):
+                    model = Qwen3VLForConditionalGeneration(
+                        config, language_model_cls=_EmptyLanguageModel
+                    )
+                owns_vision = any(
+                    name.startswith("visual.") for name, _ in model.named_parameters()
+                )
+                self.assertEqual(owns_vision, rank == 0 or encoder_only)
 
     @staticmethod
     def _model(visual, *, use_data_parallel):

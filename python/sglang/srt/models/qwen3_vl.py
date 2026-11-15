@@ -1338,7 +1338,9 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         self.use_data_parallel = get_mm().mm_enable_dp_encoder
 
         self.language_model_only = getattr(config, "language_model_only", False)
-        if self.language_model_only:
+        if self.language_model_only or not (
+            self.pp_group.is_first_rank or getattr(config, "encoder_only", False)
+        ):
             self.visual = None
         else:
             self.visual = Qwen3VLMoeVisionModel(
