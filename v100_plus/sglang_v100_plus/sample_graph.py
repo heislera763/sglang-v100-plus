@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+
 from sglang.srt.runtime_context import (
     get_buffer,
     get_disagg,
@@ -87,7 +89,7 @@ class SampleGraph:
             max_tree_depth=verify_input.max_tree_depth,
             **_clone_fields(verify_input, _PLAN_INPUTS),
         )
-        self.logits = SimpleNamespace(
+        self.logits = LogitsProcessorOutput(
             next_token_logits=logits_output.next_token_logits.clone()
         )
         device = self.logits.next_token_logits.device
@@ -140,7 +142,8 @@ def sample_graph(
     logits = logits_output.next_token_logits
     q = verify_input.draft_probs
     if (
-        not logits.is_cuda
+        getattr(logits_output, "next_token_logits_vocab_shard", None) is not None
+        or not logits.is_cuda
         or torch.cuda.get_device_capability(logits.device) != (7, 0)
         or logits.dtype != torch.float32
         or not logits.is_contiguous()
