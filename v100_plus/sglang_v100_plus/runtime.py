@@ -427,6 +427,9 @@ def install():
 
     install_minimax_hooks(hooks, HookType)
     install_minimax_attention(hooks, HookType)
+    from .lora import install_hooks as install_lora_hooks
+
+    install_lora_hooks(hooks, HookType)
     from .paired_prefill import all_reduce as paired_all_reduce
     from .paired_prefill import model_forward as paired_model_forward
     from .prefill import model_forward, prepare_attention

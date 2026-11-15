@@ -88,6 +88,9 @@ def _combine(
     Ids,
     Router,
     Out,
+    LoraAlpha,
+    LoraB,
+    LORA: tl.constexpr,
     H: tl.constexpr,
     TOPK: tl.constexpr,
     SPLITS: tl.constexpr,
@@ -110,13 +113,24 @@ def _combine(
         0,
     )
     down = tl.sum(p, axis=1)
+    if LORA:
+        alpha = tl.load(LoraAlpha + flat_routes, valid, 0).to(tl.float32)
+        b = tl.load(
+            LoraB + experts[:, None] * H + n[None, :], valid[:, None], 0
+        ).to(tl.float32)
+        delta = (alpha[:, None] * b).to(tl.float16).to(tl.float32)
+        down = (
+            (down.to(tl.float16).to(tl.float32) + delta)
+            .to(tl.float16)
+            .to(tl.float32)
+        )
     weights = tl.load(Router + flat_routes, valid, 0)
     weighted = (down * weights[:, None]).to(tl.float16).to(tl.float32)
     result = tl.sum(weighted, axis=0).to(tl.float16)
     tl.store(Out + row * H + n, result)
 
 
-def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights):
+def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights, *, down_lora=None):
     """Whole 640-wide experts; IDs are already local or masked with -1."""
     from sglang.srt.runtime_context import get_buffer
 
@@ -166,6 +180,12 @@ def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights):
         x, w13, s13, ids, gate, 1280, 2560, False, topk, rows, 64, 128, 256, num_warps=4
     )
     _activate[(5, num_routes)](gate, ids, activation, 640, 20, 32, 128, num_warps=4)
+    alpha = b = None
+    if down_lora is not None:
+        from sglang.kernels.ops.lora.sm70_rank_one import rank_one_coefficients
+
+        a, b = down_lora
+        alpha = rank_one_coefficients(activation, a, ids)
     _partial[(40, 5, num_routes)](
         activation,
         w2,
@@ -187,6 +207,9 @@ def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights):
         ids,
         weights,
         out,
+        alpha,
+        b,
+        down_lora is not None,
         2560,
         topk,
         5,

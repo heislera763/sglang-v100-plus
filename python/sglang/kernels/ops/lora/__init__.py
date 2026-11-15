@@ -125,4 +125,17 @@ for _fn in _ENGINE_CUTE_DSL_KERNELS:
     )
 del _fn
 
+for _fn in ("rank_one_coefficients", "rank_one_add", "routed_rank_one_add"):
+    register_kernel(
+        KernelSpec(
+            op=f"lora.sm70_{_fn}",
+            backend=KernelBackend.TRITON,
+            target=f"sglang.kernels.ops.lora.sm70_rank_one:{_fn}",
+            capabilities=frozenset(
+                {CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))}
+            ),
+        )
+    )
+del _fn
+
 __all__: list[str] = []

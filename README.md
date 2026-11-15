@@ -181,6 +181,37 @@ vision on its owning pipeline stage. Full-FP16 weight/cache sharing stays experi
 Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#api-usage),
 [Z.ai](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes).
 
+The optional [nchapman Heretic LoRA](https://huggingface.co/nchapman/Qwen3.8-Flash-Next-Heretic-LoRA/tree/9cdda5b1c1f8ba46116a29bc9a22204b33c46c79)
+uses the author's default rank-one adapter. Download its `adapter_config.json`
+and `adapter_model.safetensors` to one local directory. Add this to the Qwen
+launch, and choose a distinct served model name for the adapted model.
+
+```bash
+--json-model-override-args "{\"v100_static_lora\":\"$HOME/models/sglang/nchapman-Qwen3.8-Flash-Next-Heretic-LoRA\"}"
+```
+
+This selects one fixed adapter at startup. A restart selects another adapter.
+FP16 factors cover all 144 projections, including 48 routed down banks, with
+about 20 MiB/GPU additional allocation under PP2×TP4/EP4. The ordinary packed FP8
+base kernels run on Volta, with FP32 coefficient reductions and FP16 adapter
+product/output boundaries. Adapter addition precedes router weighting and the
+existing TP/EP reductions. MTP3, vision and prefix reuse passed at 262K allocation.
+
+Matched three-category near-8K screens use T0/seed531 with 256 outputs and
+T1/P.95/K20/xhigh with 512 outputs. Timed requests have an empty prefix cache.
+
+| Tokens/s | Before | Heretic LoRA |
+| --- | ---: | ---: |
+| Prefill, T0 | 7141 | 6785 |
+| Generation, T0 | 70.9 | 70.4 |
+| Prefill, lab sampling | 7206 | 6870 |
+| Generation, lab sampling | 58.7 | 62.9 |
+
+The target's changed continuations and MTP acceptance affect generation
+throughput. Four focused CPU/GPU cases check factor mapping, independent FP64
+results, masked routes, canaries and changed-input graph replay. Compute
+Sanitizer reports zero errors.
+
 MiniMax M3.1, TP8/EP1 with bundled DSpark, images and FP16 main/index/draft KV:
 
 ```bash

@@ -110,6 +110,8 @@ class MarlinMoeQuantInfo(MoeQuantInfo):
     w2_global_scale: Optional[torch.Tensor] = None
     w13_bias: Optional[torch.Tensor] = None
     w2_bias: Optional[torch.Tensor] = None
+    down_lora_a: Optional[torch.Tensor] = None
+    down_lora_b: Optional[torch.Tensor] = None
 
 
 @register_fused_func("none", "marlin")
@@ -211,6 +213,8 @@ def fused_experts_none_to_marlin(
         activation=runner_config.activation,
         is_gated=runner_config.is_gated,
         no_combine=runner_config.no_combine,
+        down_lora_a=quant_info.down_lora_a,
+        down_lora_b=quant_info.down_lora_b,
     ).to(hidden_states.dtype)
 
     return StandardCombineInput(

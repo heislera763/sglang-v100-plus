@@ -422,6 +422,7 @@ def apply_fp8_moe(original, method, layer, dispatch_output):
                 layer.w2_weight_scale_inv,
                 topk.topk_ids,
                 topk.topk_weights,
+                down_lora=getattr(layer, "_sm70_lora_down", None),
             )
         )
 
@@ -439,5 +440,7 @@ def apply_fp8_moe(original, method, layer, dispatch_output):
         # (or -1). Alignment needs only the stored experts, not empty global
         # expert slots on every rank.
         global_num_experts=layer.w13_weight.shape[0] if mapping is not None else -1,
+        down_lora_a=getattr(layer, "_sm70_lora_a", None),
+        down_lora_b=getattr(layer, "_sm70_lora_b", None),
     )
     return method.runner.run(dispatch_output, quant)

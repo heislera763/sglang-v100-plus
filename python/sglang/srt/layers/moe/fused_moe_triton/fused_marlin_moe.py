@@ -177,6 +177,8 @@ def fused_marlin_moe(
     activation: str = "silu",
     is_gated: bool = True,
     no_combine: bool = False,
+    down_lora_a: Optional[torch.Tensor] = None,
+    down_lora_b: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -245,6 +247,9 @@ def fused_marlin_moe(
             f"moe_wna16_marlin_gemm assumes hidden_states.dtype ({hidden_states.dtype}) == w2_scale.dtype ({w2_scale.dtype})"
         )
     assert num_bits in [4, 8]
+
+    if (down_lora_a is None) != (down_lora_b is None):
+        raise ValueError("Both down-adapter factors must be provided together")
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -400,7 +405,7 @@ def fused_marlin_moe(
         topk_weights,
         moe_block_size=block_size_m,
         top_k=1,
-        mul_topk_weights=True,
+        mul_topk_weights=down_lora_a is None,
         zero_inactive_output=True,
         is_ep=expert_map is not None,
         expert_ids_are_sorted=expert_map is None,
@@ -414,6 +419,20 @@ def fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     ).view(-1, topk, K)
+
+    if down_lora_a is not None:
+        from sglang.kernels.ops.lora.sm70_rank_one import routed_rank_one_add
+
+        # Preserve the adapter's FP16 base/output and A/B product boundaries.
+        # Router weighting follows the complete adapted down projection.
+        intermediate_cache3 = routed_rank_one_add(
+            intermediate_cache2,
+            intermediate_cache3.view(-1, K),
+            down_lora_a,
+            down_lora_b,
+            topk_ids,
+            topk_weights,
+        ).view(-1, topk, K)
 
     if no_combine:
         return intermediate_cache3
