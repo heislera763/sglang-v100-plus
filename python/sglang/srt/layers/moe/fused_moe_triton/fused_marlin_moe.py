@@ -423,7 +423,7 @@ def fused_marlin_moe(
     if down_lora_a is not None:
         from sglang.kernels.ops.lora.sm70_rank_one import routed_rank_one_add
 
-        # Preserve the adapter's FP16 base/output and A/B product boundaries.
+        # Keep the base/output FP16 while computing the adapter update in FP32.
         # Router weighting follows the complete adapted down projection.
         intermediate_cache3 = routed_rank_one_add(
             intermediate_cache2,

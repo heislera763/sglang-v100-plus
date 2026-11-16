@@ -118,7 +118,7 @@ def _combine(
         b = tl.load(
             LoraB + experts[:, None] * H + n[None, :], valid[:, None], 0
         ).to(tl.float32)
-        delta = (alpha[:, None] * b).to(tl.float16).to(tl.float32)
+        delta = alpha[:, None] * b
         down = (
             (down.to(tl.float16).to(tl.float32) + delta)
             .to(tl.float16)

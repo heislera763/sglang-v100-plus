@@ -73,7 +73,7 @@
     "python/sglang/srt/models/qwen4_exp.py": "Skip visual checkpoint tensors on PP workers without a vision encoder.",
     "python/sglang/srt/eplb/expert_location.py": "Bound replica-map capacity by redundant expert slots while preserving placement-update and graph addresses.",
     "python/sglang/kernels/ops/lora/__init__.py": "Register lazy SM70 FP16 rank-one dense/routed adapter operators.",
-    "python/sglang/kernels/ops/lora/sm70_rank_one.py": "Resident FP16 adapter factors with FP32 coefficient reduction, masked routes, original router weighting and graph-safe input refresh.",
+    "python/sglang/kernels/ops/lora/sm70_rank_one.py": "Resident FP16 adapter factors with FP32 coefficients and updates, masked routes, original router weighting and graph-safe input refresh.",
     "python/sglang/srt/layers/moe/moe_runner/marlin.py": "Carry optional rank-one down-adapter tensors into the ordinary packed Marlin runner."
   }
 }

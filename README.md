@@ -182,35 +182,41 @@ Lab sampling references: [Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#a
 [Z.ai](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes).
 
 The optional [nchapman Heretic LoRA](https://huggingface.co/nchapman/Qwen3.8-Flash-Next-Heretic-LoRA/tree/9cdda5b1c1f8ba46116a29bc9a22204b33c46c79)
-uses the author's default rank-one adapter. Download its `adapter_config.json`
-and `adapter_model.safetensors` to one local directory. Add this to the Qwen
-launch, and choose a distinct served model name for the adapted model.
+has a full-strength agent-coherence failure in this FP8/FP16 configuration,
+reproduced with both our factorized kernels and a merged-weight control.
+The screened local derivative multiplies all 144 released B tensors by 0.5,
+preserving A tensors and `adapter_config.json`. Give its directory a distinct
+name and add it to the Qwen launch with a distinct served model name.
 
 ```bash
---json-model-override-args "{\"v100_static_lora\":\"$HOME/models/sglang/nchapman-Qwen3.8-Flash-Next-Heretic-LoRA\"}"
+--json-model-override-args "{\"v100_static_lora\":\"$HOME/models/sglang/nchapman-Qwen3.8-Flash-Next-Heretic-LoRA-scale-0.5\"}"
 ```
 
 This selects one fixed adapter at startup. A restart selects another adapter.
 FP16 factors cover all 144 projections, including 48 routed down banks, with
 about 20 MiB/GPU additional allocation under PP2×TP4/EP4. The ordinary packed FP8
-base kernels run on Volta, with FP32 coefficient reductions and FP16 adapter
-product/output boundaries. Adapter addition precedes router weighting and the
-existing TP/EP reductions. MTP3, vision and prefix reuse passed at 262K allocation.
+base kernels run on Volta, with FP32 adapter coefficients and updates and FP16
+outputs. Adapter addition precedes router weighting and the existing TP/EP
+reductions. FP32 intermediates improve agreement with PEFT. The half-strength
+copy passes greedy and lab-sampled Pi file reads, image and prefix-reuse checks
+at 262K allocation. Broad behavioral quality and full-window execution remain
+unqualified.
 
 Matched three-category near-8K screens use T0/seed531 with 256 outputs and
 T1/P.95/K20/xhigh with 512 outputs. Timed requests have an empty prefix cache.
+The compatible recorded plain-FP8 baseline is reused.
 
-| Tokens/s | Before | Heretic LoRA |
+| Tokens/s | Before | After, 0.5× LoRA |
 | --- | ---: | ---: |
-| Prefill, T0 | 7141 | 6785 |
-| Generation, T0 | 70.9 | 70.4 |
-| Prefill, lab sampling | 7206 | 6870 |
-| Generation, lab sampling | 58.7 | 62.9 |
+| Prefill, T0 | 7141 | 6946 |
+| Generation, T0 | 70.9 | 68.6 |
+| Prefill, lab sampling | 7206 | 6814 |
+| Generation, lab sampling | 58.7 | 63.0 |
 
 The target's changed continuations and MTP acceptance affect generation
-throughput. Four focused CPU/GPU cases check factor mapping, independent FP64
-results, masked routes, canaries and changed-input graph replay. Compute
-Sanitizer reports zero errors.
+throughput. The earlier checks covered factor mapping, independent FP64 results,
+masked routes, canaries and changed-input graph replay. Compute Sanitizer
+reported zero errors for that implementation.
 
 MiniMax M3.1, TP8/EP1 with bundled DSpark, images and FP16 main/index/draft KV:
 

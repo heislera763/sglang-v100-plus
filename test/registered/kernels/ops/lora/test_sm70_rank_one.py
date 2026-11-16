@@ -1,4 +1,4 @@
-"""Rank-one factor boundaries, masked routes and changing-input graph replay."""
+"""FP32 adapter updates, masked routes and changing-input graph replay."""
 
 import pytest
 import torch
@@ -38,9 +38,9 @@ def _reference(x, base, a, b, ids=None, weights=None):
         e = 0 if ids is None else int(ids.flatten()[row])
         if e < 0:
             continue
-        alpha = (x[row] * a[e]).sum().half().double()
-        delta = (alpha * b[e]).half()
-        result[row] = base[row].half() + delta
+        alpha = (x[row] * a[e]).sum().float()
+        delta = alpha * b[e].float()
+        result[row] = base[row].half().float() + delta
         if weights is not None:
             result[row] = result[row].float() * float(weights.flatten()[row])
     return result
@@ -61,6 +61,15 @@ def test_dense_factors_and_output_canaries():
         rank_one_add(x, y, a, b)
         torch.testing.assert_close(y.cpu(), expected, rtol=0.001, atol=0.0002)
         assert (storage[:16] == 19).all() and (storage[-16:] == 19).all()
+
+    # Rounding either the coefficient or delta to FP16 erases this update.
+    x = torch.ones(1, 2, device="cuda", dtype=torch.float16)
+    a = torch.tensor([[1.0, 2**-11]], device="cuda", dtype=torch.float16)
+    b = torch.ones(1, 1, device="cuda", dtype=torch.float16)
+    y = -torch.ones(1, 1, device="cuda", dtype=torch.float16)
+    expected = (y.float() + (x.float() @ a.float().t()) @ b.float()).half()
+    rank_one_add(x, y, a, b)
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 
 def test_routed_changed_inputs_and_graph_replay():

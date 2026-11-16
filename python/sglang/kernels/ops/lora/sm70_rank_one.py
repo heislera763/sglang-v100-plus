@@ -1,4 +1,4 @@
-"""Resident FP16 rank-one adapters with FP32 dot-product accumulation."""
+"""Resident FP16 factors with FP32 coefficients and adapter updates."""
 
 import torch
 import triton
@@ -31,7 +31,7 @@ def _add(
     if expert >= 0:
         alpha = tl.load(Alpha + row).to(tl.float32)
         b = tl.load(B + expert * N + n, n < N, 0).to(tl.float32)
-        delta = (alpha * b).to(tl.float16).to(tl.float32)
+        delta = alpha * b
         base = tl.load(Out + row * N + n, n < N, 0).to(tl.float32)
         result = (base + delta).to(tl.float16).to(tl.float32)
         if ROUTED:
@@ -40,7 +40,7 @@ def _add(
 
 
 def rank_one_coefficients(x, a, ids=None):
-    """Compute FP16 x @ A.T, independently for each already-expanded route."""
+    """Compute FP32 x @ A.T, independently for each already-expanded route."""
     if x.ndim != 2 or a.ndim != 2 or x.shape[1] != a.shape[1]:
         raise ValueError("Rank-one input and factor dimensions disagree")
     if ids is None and a.shape[0] != 1:
@@ -56,7 +56,7 @@ def rank_one_coefficients(x, a, ids=None):
         raise ValueError("Rank-one operands must be FP16")
     if x.device.type != "cuda" or torch.cuda.get_device_capability(x.device) != (7, 0):
         raise ValueError("Resident rank-one adapters require SM70 CUDA")
-    out = torch.empty(x.shape[0], dtype=x.dtype, device=x.device)
+    out = torch.empty(x.shape[0], dtype=torch.float32, device=x.device)
     if x.shape[0]:
         _coefficients[(x.shape[0],)](
             x,
@@ -72,7 +72,7 @@ def rank_one_coefficients(x, a, ids=None):
 
 
 def rank_one_add(x, output, a, b):
-    """Add a dense FP16 rank-one projection to an existing FP16 linear result."""
+    """Add an FP32 rank-one update to an existing FP16 linear result."""
     x = x.reshape(-1, x.shape[-1]).contiguous()
     y = output.view(x.shape[0], output.shape[-1])
     if b.shape != (1, y.shape[1]) or not y.is_contiguous() or y.dtype != torch.float16:
