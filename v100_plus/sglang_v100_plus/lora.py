@@ -54,9 +54,11 @@ def adapter_factors(path):
             factor = suffix[0]
             if factor in bank:
                 raise ValueError(f"Duplicate adapter factor {key}")
-            bank[factor] = file.get_tensor(key).to(torch.float16)
+            tensor = file.get_tensor(key)
+            dtype = torch.float32 if tensor.dtype == torch.float32 else torch.float16
+            bank[factor] = tensor.to(dtype)
             if bank[factor].ndim != 2 or not torch.isfinite(bank[factor]).all():
-                raise ValueError(f"Adapter factor is not a finite FP16 matrix {key}")
+                raise ValueError(f"Adapter factor is not a finite matrix {key}")
     if set(factors) != targets or any(
         set(bank) != {"A", "B"} for bank in factors.values()
     ):
@@ -90,6 +92,18 @@ def load_adapter(original, self, *, model_config, device_config):
         )
 
     factors = adapter_factors(path)
+    supported = {
+        f"model.layers.{layer}.{projection}"
+        for layer in range(model_config.num_hidden_layers)
+        for projection in (
+            "o_proj",
+            "linear_attn.out_proj",
+            "mlp.shared_expert.down_proj",
+            "mlp.experts.down_proj",
+        )
+    }
+    if not factors or not set(factors).issubset(supported):
+        raise ValueError("Static Qwen adapter has unsupported projection targets")
     from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
 
     placement = get_global_expert_location_metadata()
@@ -152,7 +166,7 @@ def load_adapter(original, self, *, model_config, device_config):
             module.quant_method = copy(module.quant_method)
             module.quant_method.apply = partial(apply_dense, module.quant_method.apply)
         applied.append(name)
-    if set(applied) != expected or len(applied) != (end - start) * 3:
+    if set(applied) != expected:
         raise ValueError("Static Qwen adapter did not cover all local projections")
     model._sm70_static_lora_targets = tuple(applied)
     logger.info(

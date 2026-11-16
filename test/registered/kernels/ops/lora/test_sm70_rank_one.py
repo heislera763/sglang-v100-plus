@@ -46,14 +46,15 @@ def _reference(x, base, a, b, ids=None, weights=None):
     return result
 
 
-def test_dense_factors_and_output_canaries():
+@pytest.mark.parametrize("factor_dtype", [torch.float16, torch.float32])
+def test_dense_factors_and_output_canaries(factor_dtype):
     from sglang.kernels.ops.lora.sm70_rank_one import rank_one_add
 
     torch.manual_seed(531)
     for m, k in ((0, 160), (1, 1536), (4, 1536), (33, 160)):
         x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.1
-        a = torch.randn(1, k, device="cuda", dtype=torch.float16) * 0.1
-        b = torch.randn(1, 2560, device="cuda", dtype=torch.float16) * 0.1
+        a = torch.randn(1, k, device="cuda", dtype=factor_dtype) * 0.1
+        b = torch.randn(1, 2560, device="cuda", dtype=factor_dtype) * 0.1
         storage = torch.full((m * 2560 + 32,), 19.0, device="cuda", dtype=torch.float16)
         y = storage[16:-16].view(m, 2560)
         y.normal_(0, 0.1)
@@ -64,22 +65,25 @@ def test_dense_factors_and_output_canaries():
 
     # Rounding either the coefficient or delta to FP16 erases this update.
     x = torch.ones(1, 2, device="cuda", dtype=torch.float16)
-    a = torch.tensor([[1.0, 2**-11]], device="cuda", dtype=torch.float16)
-    b = torch.ones(1, 1, device="cuda", dtype=torch.float16)
+    a = torch.tensor([[1.0, 2**-11]], device="cuda", dtype=factor_dtype)
+    if factor_dtype == torch.float32:
+        a = torch.tensor([[1.0 + 2**-12, 2**-12]], device="cuda")
+    b = torch.ones(1, 1, device="cuda", dtype=factor_dtype)
     y = -torch.ones(1, 1, device="cuda", dtype=torch.float16)
     expected = (y.float() + (x.float() @ a.float().t()) @ b.float()).half()
     rank_one_add(x, y, a, b)
     torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 
-def test_routed_changed_inputs_and_graph_replay():
+@pytest.mark.parametrize("factor_dtype", [torch.float16, torch.float32])
+def test_routed_changed_inputs_and_graph_replay(factor_dtype):
     from sglang.kernels.ops.lora.sm70_rank_one import routed_rank_one_add
 
     torch.manual_seed(531)
     m, k, n, e = 40, 640, 2560, 4
     x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.1
-    a = torch.randn(e, k, device="cuda", dtype=torch.float16) * 0.1
-    b = torch.randn(e, n, device="cuda", dtype=torch.float16) * 0.1
+    a = torch.randn(e, k, device="cuda", dtype=factor_dtype) * 0.1
+    b = torch.randn(e, n, device="cuda", dtype=factor_dtype) * 0.1
     ids = torch.arange(m, device="cuda", dtype=torch.int32).remainder(e)
     ids[::3] = -1
     weights = torch.rand(m, device="cuda")
@@ -114,7 +118,8 @@ def test_routed_changed_inputs_and_graph_replay():
         assert (storage[:16] == 19).all() and (storage[-16:] == 19).all()
 
 
-def test_packed_fp8_decode_and_marlin_with_expert_adapters():
+@pytest.mark.parametrize("factor_dtype", [torch.float16, torch.float32])
+def test_packed_fp8_decode_and_marlin_with_expert_adapters(factor_dtype):
     from functools import partial
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -160,8 +165,8 @@ def test_packed_fp8_decode_and_marlin_with_expert_adapters():
         dtype=torch.int32,
     )
     weights = torch.rand(ids.shape, device="cuda") / 3
-    a = torch.randn(e, k, device="cuda", dtype=torch.float16) * 0.1
-    b = torch.randn(e, h, device="cuda", dtype=torch.float16) * 0.1
+    a = torch.randn(e, k, device="cuda", dtype=factor_dtype) * 0.1
+    b = torch.randn(e, h, device="cuda", dtype=factor_dtype) * 0.1
     expected = torch.zeros(4, h, dtype=torch.float32)
     w1_ref, w2_ref = w1.cpu().double() * 0.25, w2.cpu().double() * 0.25
     for row in range(4):

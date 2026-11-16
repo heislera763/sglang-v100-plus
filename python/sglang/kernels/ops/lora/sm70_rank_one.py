@@ -1,4 +1,4 @@
-"""Resident FP16 factors with FP32 coefficients and adapter updates."""
+"""Resident FP16/FP32 factors with FP32 coefficients and adapter updates."""
 
 import torch
 import triton
@@ -52,8 +52,8 @@ def rank_one_coefficients(x, a, ids=None):
     tensors = (x, a) if ids is None else (x, a, ids)
     if any(t.device != x.device or not t.is_contiguous() for t in tensors):
         raise ValueError("Rank-one operands must be contiguous and colocated")
-    if x.dtype != torch.float16 or a.dtype != torch.float16:
-        raise ValueError("Rank-one operands must be FP16")
+    if x.dtype != torch.float16 or a.dtype not in (torch.float16, torch.float32):
+        raise ValueError("Rank-one input must be FP16 with FP16/FP32 factors")
     if x.device.type != "cuda" or torch.cuda.get_device_capability(x.device) != (7, 0):
         raise ValueError("Resident rank-one adapters require SM70 CUDA")
     out = torch.empty(x.shape[0], dtype=torch.float32, device=x.device)
@@ -77,8 +77,12 @@ def rank_one_add(x, output, a, b):
     y = output.view(x.shape[0], output.shape[-1])
     if b.shape != (1, y.shape[1]) or not y.is_contiguous() or y.dtype != torch.float16:
         raise ValueError("Invalid rank-one output or B factor")
-    if b.dtype != torch.float16 or b.device != x.device or not b.is_contiguous():
-        raise ValueError("B factor must be contiguous colocated FP16")
+    if (
+        b.dtype not in (torch.float16, torch.float32)
+        or b.device != x.device
+        or not b.is_contiguous()
+    ):
+        raise ValueError("B factor must be contiguous colocated FP16/FP32")
     alpha = rank_one_coefficients(x, a)
     if x.shape[0]:
         _add[(x.shape[0], triton.cdiv(y.shape[1], 256))](
@@ -103,7 +107,7 @@ def routed_rank_one_add(x, output, a, b, ids, weights):
         raise ValueError("Routed factor or router-weight dimensions disagree")
     if (
         output.dtype != torch.float16
-        or b.dtype != torch.float16
+        or b.dtype not in (torch.float16, torch.float32)
         or weights.dtype != torch.float32
     ):
         raise ValueError("Routed output must be FP16 with FP32 router weights")
