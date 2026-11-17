@@ -108,10 +108,24 @@ def test_fp16_decode_graph_refreshes_masks_requests_lengths_and_values(heads):
     for _ in range(3):
         sm70_cuda_qsa_decode(q, k, v, table, requests, indices, lengths, 256**-0.5)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    allocate = torch.empty
+
+    def poison_partials(*args, **kwargs):
+        result = allocate(*args, **kwargs)
+        if result.shape in ((4, 40, heads, 256), (4, 40, heads)):
+            result.fill_(float("nan"))
+        return result
+
+    # Poison on every replay to expose reads of unwritten split tails.
+    with patch.object(torch, "empty", poison_partials), torch.cuda.graph(graph):
         actual = sm70_cuda_qsa_decode(
             q, k, v, table, requests, indices, lengths, 256**-0.5
         )
+    length_updates = (
+        [0, 1, 65, 2161],
+        [1281, 1282, 1283, 1284],
+        [1321, 1322, 2047, 2048],
+    )
     for update in range(3):
         q.normal_()
         k.normal_()
@@ -119,7 +133,9 @@ def test_fp16_decode_graph_refreshes_masks_requests_lengths_and_values(heads):
         requests.copy_(
             torch.tensor([update, 2, 0, 1], device="cuda", dtype=torch.int32)
         )
-        lengths.copy_(torch.tensor([0, 1, 65, 2161], device="cuda", dtype=torch.int32))
+        lengths.copy_(
+            torch.tensor(length_updates[update], device="cuda", dtype=torch.int32)
+        )
         indices.copy_(
             torch.randint(0, 2161, indices.shape, device="cuda", dtype=torch.int32)
         )

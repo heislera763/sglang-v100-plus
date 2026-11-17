@@ -103,12 +103,9 @@ __global__ void __launch_bounds__(kThreads, 1) qsa_decode_partial_kernel(
   if (split_id >= active_splits || context <= 0) {
     return;
   }
-  const int split_len = (context + active_splits - 1) / active_splits;
-  const int split_begin = split_id * split_len;
-  const int split_end = min(context, split_begin + split_len);
-  if (split_begin >= split_end) {
-    return;
-  }
+  // Balanced boundaries keep every active split nonempty.
+  const int split_begin = context * split_id / active_splits;
+  const int split_end = context * (split_id + 1) / active_splits;
 
   __shared__ __half ks[kSmemKV];
   __shared__ __half vs[kSmemKV];
