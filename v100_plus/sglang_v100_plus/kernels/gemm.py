@@ -172,6 +172,23 @@ _MINIMAX_BLAS_SHAPES = {
 }
 
 
+# Hy4 Flash TP8 keeps its unquantized attention, indexer and latent MoE
+# projections on cuBLAS. Routed block-FP8 experts use Marlin.
+_HY4_BLAS_SHAPES = {
+    (1600, 3072),  # fused MLA query/KV input
+    (1024, 1024), (2048, 1024),  # query and indexer projections
+    (1792, 512), (3584, 512),  # unabsorbed key/value projections
+    (1024, 3072), (2048, 3072),  # attention output gate
+    (3072, 1024), (3072, 2048),  # attention output
+    (1536, 3072), (3072, 1536),  # replicated latent MoE transforms
+    (3456, 3072), (3072, 1728),  # first dense FFN
+    (384, 3072), (3072, 192),  # shared expert
+    (432, 1152), (1152, 144),  # vision QKV and attention output
+    (538, 1152), (1152, 538),  # vision FFN
+    (15104, 3072),  # vocabulary
+}
+
+
 def shape_supported(x, weight):
     return (
         os.environ.get("SGLANG_SM70_MTP_SMALL_GEMM", "1") == "1"
@@ -204,7 +221,7 @@ def blas_supported(x, weight, bias=None):
     if x.dtype == torch.float32:
         return (
             x.ndim == 2
-            and tuple(weight.shape) in ((32, 4096), (128, 6144))
+            and tuple(weight.shape) in ((32, 4096), (128, 6144), (4, 12288))
             and bias is None
         )
     if x.ndim == 2:
@@ -217,7 +234,9 @@ def blas_supported(x, weight, bias=None):
         if native_small:
             return False
         if (
-            shape in _GLM_BLAS_SHAPES or shape in _MINIMAX_BLAS_SHAPES
+            shape in _GLM_BLAS_SHAPES
+            or shape in _MINIMAX_BLAS_SHAPES
+            or shape in _HY4_BLAS_SHAPES
         ) and bias is None:
             return True
         if rows in (2, 3, 4) and shape in ((1, 2560), (10240, 2560)):

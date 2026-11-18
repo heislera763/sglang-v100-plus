@@ -331,6 +331,7 @@ class HYV4Attention(DeepseekV2AttentionMLA):
         prefix="",
         alt_stream=None,
         is_nextn=False,
+        initialize_dsa_indexer=True,
     ):
         rope_parameters = config.rope_parameters
         super().__init__(
@@ -356,6 +357,7 @@ class HYV4Attention(DeepseekV2AttentionMLA):
             prefix=prefix,
             alt_stream=alt_stream,
             is_nextn=is_nextn,
+            initialize_dsa_indexer=initialize_dsa_indexer,
         )
         self.linear_gate = ColumnParallelLinear(
             config.hidden_size,

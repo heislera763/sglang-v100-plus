@@ -1056,7 +1056,14 @@ class HYV4FlashAttention(HYV4Attention):
             layer_config.qk_nope_head_dim = config.swa_qk_nope_head_dim
             layer_config.qk_rope_head_dim = config.swa_qk_rope_head_dim
             layer_config.v_head_dim = config.swa_v_head_dim
-        super().__init__(layer_config, layer_id, quant_config, prefix, alt_stream)
+        super().__init__(
+            layer_config,
+            layer_id,
+            quant_config,
+            prefix,
+            alt_stream,
+            initialize_dsa_indexer=False,
+        )
         if rope_store is not None:
             self.rotary_emb = _FlashMRotaryEmbedding(
                 self.rotary_emb,

@@ -845,14 +845,14 @@ def route_top10(original, scores, bias, topk, *args, **kwargs):
         scores.is_cuda
         and scores.dtype in (torch.float16, torch.float32)
         and scores.ndim == 2
-        and (scores.shape[1], topk) in ((288, 8), (128, 4))
+        and (scores.shape[1], topk) in ((288, 8), (128, 4), (512, 16))
         and bias is not None
         and bias.shape == (scores.shape[1],)
         and bias.device == scores.device
         and bias.dtype in (torch.float16, torch.float32)
         and torch.cuda.get_device_capability(scores.device) == (7, 0)
     ):
-        # GLM top-8 and MiniMax top-4 use the FP32 Triton biased router.
+        # GLM, MiniMax and Hy4 use the FP32 Triton biased router.
         # Its SM100-only radix branch cannot activate on this device.
         return original(scores, bias, topk, *args, **kwargs)
     reject_fallback(

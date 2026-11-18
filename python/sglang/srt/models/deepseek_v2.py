@@ -2091,6 +2091,7 @@ class DeepseekV2AttentionMLA(
         is_nextn: bool = False,
         attn_type: AttentionType = AttentionType.DECODER,
         sliding_window_size: int = -1,
+        initialize_dsa_indexer: bool = True,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -2175,7 +2176,7 @@ class DeepseekV2AttentionMLA(
                 self.skip_topk = dsa_layer_skips_topk(config, layer_id)
                 self.next_skip_topk = dsa_layer_skips_topk(config, layer_id + 1)
 
-            if not self.skip_topk or is_nextn:
+            if initialize_dsa_indexer and (not self.skip_topk or is_nextn):
                 is_neox_style = not getattr(config, "indexer_rope_interleave", False)
                 indexer_cls = (
                     IndexerKPool
