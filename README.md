@@ -13,7 +13,9 @@ metadata and cache/state lifetimes. Advance `main` after correctness and model
 throughput checks. Qwen retains its existing backend during this work.
 Clone remotes: `origin` is this fork; `upstream` is `sgl-project/sglang`.
 
-Integrated upstream: [c3c292b6](https://github.com/sgl-project/sglang/commit/c3c292b65ab42efd933e0c77cfb48eb69f1b81d0), integrated 2026-11-07.
+The Hy4 performance branch additionally integrates [upstream aa83b037](https://github.com/sgl-project/sglang/commit/aa83b0376b23c647b1272fbb0f47f64e2a74b8bd) and builds sglang-kernel 0.4.11 for SM70.
+
+Previous integration: [c3c292b6](https://github.com/sgl-project/sglang/commit/c3c292b65ab42efd933e0c77cfb48eb69f1b81d0), integrated 2026-11-07.
 The prior update included GLM tool-name normalization and KDA fixes; the latest
 also adds a fused GLM KDA decode path for newer GPUs. The SM70 profile continues
 to use its own KDA kernels. Draft KV planning and Triton execution share the
@@ -32,6 +34,7 @@ Pinned benchmark sources; sizes are weight-file totals, **not runtime VRAM**.
 
 | Checkpoint | Revision | Composition | Files |
 | --- | --- | --- | ---: |
+| [Tencent Hy4 Flash FP8](https://huggingface.co/tencent/Hy4-flash-FP8/tree/003107fa248f5892064ab1c43af0a7003dd68c9b) | `003107fa248f` | FP8 routed experts and projections, BF16 Engram and vision weights, built-in five-layer DFly2 | 267.36 GiB |
 | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/236dfdf285828023ca3bcd3f37366c58a3469b13) | `236dfdf28582` | Official 128×128 block FP8, BF16 exclusions; FP8 PLE/MTP experts | 172.78 GiB |
 | [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4/tree/da920bb0b9f4a06727223a349e55468e38352348) | `da920bb0b9f4` | ModelOpt abs-max NVFP4; main shared experts remain BF16; FP8 KV metadata | 190.40 GiB |
 | [nvidia/GLM-5.3-Flash-FP4-Local](https://huggingface.co/nvidia/GLM-5.3-Flash-FP4-Local/tree/76348ddb2be2e35e39ecfc00e75dc07703f4f3d5) | `76348ddb2be2` | QAD mixed precision: CSF32-compressed NVFP4 expert scales, MXFP8 projections, block-FP8 shared experts and quantized vision/MTP | 165.33 GiB |
@@ -74,6 +77,7 @@ in software; it does not imply native arithmetic in those formats.
 | NVFP4 GEMMs | [marlin-v100](https://github.com/heislera763/marlin-v100) at `95b1e62e` plus local patches: W4A16, FP16 WMMA with FP32 accumulation; block/global scales remain distinct. TP4/TP8 routed prefill uses64×256×32 cached-row Marlin tiles. Small routed groups at both TP sizes use [Volta MMA](python/sglang/kernels/ops/gemm/sm70_nvfp4_routed.py) with M16 tiles and K-major decoded weights; FP16 dequantization/output and FP32 accumulation/scaling remain. Unused alternate-backend MoE scale buffers alias active scales, saving17.72GiB across GLM's8GPUs. |
 | FP8 GEMMs | W8A16 with block128 or MXFP8 group32 scales. [Small-row GEMV](python/sglang/kernels/ops/gemm/sm70_fp8_gemv.py) reuses reconstructed FP16 weights across1–8 rows and reduces K in FP32. Short-K projections fuse their finishing reduction; large group32 verification projections decode four packed bytes together in native CUDA and retain scales across each group. Five-to-eight-row batches use FP32 FMA; finite FP16 products are exact in FP32, preserving the accumulation result with fewer instructions. [Prefill](python/sglang/kernels/ops/gemm/sm70_fp8_gemm.py) transiently unpacks one projection for native FP16 Tensor Cores/FP32 accumulation; no persistent FP16 weight bank. Intermediate row counts retain SM70 Marlin. Qwen block-FP8 experts retain their separate small-row kernels; EP4/EP8 preserves whole experts. |
 | FP16 routed experts | [Volta MMA GEMM](python/sglang/kernels/ops/moe/sm70_fp16.py), retained for the original NVIDIA checkpoint's unquantized MTP experts. FP16 inputs/weights/output, FP32 accumulation and router multiply; upstream routing, activation and expert sum retained. Automatically selected by the SM70 plugin; unsupported epilogues fail under strict dispatch. |
+| Hy4 Flash | FP16 latent KV, 30 sliding-window and 12 IndexPool layers. Selected-key Tensor Core GEMMs preserve index order. GPU lookups read sharded host Engram tables. DFly2 shares target KV and selected keys. |
 | Qwen QSA/GDN/HC | Direct FP16-cache sparse prefill/decode/verification, masked Tensor Core prefill, SM70 GDN and gated-residual kernels; HC eager prefill partitions within each quad, including TP8. |
 | GLM attention | [Canonical V100 CUDA backend](python/sglang/kernels/ops/attention/v100.py) from the [FA fork](https://github.com/heislera763/flash-attention-v100): selected-key FP16 sparse prefill/decode/MTP, FP32 reductions and FP16 probabilities/partials. The upstream Triton sparse-MLA modules are unmodified; this profile uses the FA implementation throughout. The model-native FP8 indexer uses [one Volta MMA scorer](python/sglang/kernels/ops/attention/dsa/sm70_indexer_score.py) for per-query decode and shared-history prefill. Prefill keeps ReLU/head weighting/reduction on-chip, converts the shared index bank once per chunk and reuses64-key tiles across query pairs with24KiB shared scratch; no global per-head score tensor. Whole-chunk query selection is shared within existing DCP4 quads; only final selected IDs are exchanged. Decode/verification gathers initialize only live counted prefixes; future scratch is masked by the scorer. |
 | GLM KDA / mHC | Native CUDA full-K FP32 recurrence, FP16 state and per-step verification carry. KDA prefill prepares normalized Q/K and gates once; a Tensor Core chunk formulation is future work. Paired prefill uses exact fused full-row mHC preparation and avoids the local gathers; other profiles retain quad partitions. Its learned FP32 projection stays replicated to preserve reduction order. |
@@ -269,6 +273,17 @@ the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
 | Other switches | GLM metadata/sample graphs and alternate NVFP4 MoE GEMV remain off without a model-level benefit. Qwen metadata graphs retain their qualified PP2 use. Generic split-K/decode and attention/expert-topology trials that lost were removed. |
 
 ## Performance and validation
+
+**Hy4 Flash FP8 on eight V100s.** TP8/EP4, FP16 KV, 262,144 context, vision, batch one. Prefill is effective uncached input throughput on 8.4K code and 9.6K document prompts. Generation averages those prompts and a short thinking chat at 160 output tokens. Code is greedy. Document and chat use temperature 0.9 and top-p 1.
+
+| Tokens/s | Before | Ordered SM70 attention and routing |
+|---|---:|---:|
+| Raw prefill | 1,919 | 2,468 |
+| Raw decode | 39.1 | 42.6 |
+| DFly2 prefill, three drafts | 1,886 | 2,480 |
+| DFly2 decode, three drafts | 49.9 | 57.2 |
+
+The raw path reproduced the control’s 160-token greedy completion and all 128 scored positions’ returned log probabilities. The DFly2 verifier uses four target rows and can produce a different greedy continuation. The comparison used the same prompts, draft depth, checkpoint and upstream integration.
 
 MiniMax M3.1 screen (2026-10-31): TP8/EP1, bundled DSpark/8 verification positions,
 10K context, FP16 main/index/draft KV and vision, chunk1024, one request, strict
