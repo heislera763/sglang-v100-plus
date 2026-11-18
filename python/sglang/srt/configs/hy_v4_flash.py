@@ -12,6 +12,7 @@ from typing import Any, Optional
 import msgspec
 from transformers.configuration_utils import PretrainedConfig
 
+from sglang.kernels.arch import current_arch
 from sglang.srt.configs.hy_v4 import HYV4VLVisionConfig
 from sglang.srt.configs.hy_v4_vl_processing import HYV4VLProcessor
 from sglang.srt.multimodal.customized_mm_processor_utils import (
@@ -332,6 +333,19 @@ class HYV4FlashTextConfig(PretrainedConfig):
 
     def rope_for_layer_type(self, layer_type: str) -> dict:
         return self.layer_rope_parameters[layer_type]
+
+    @property
+    def is_hybrid_swa(self) -> bool:
+        arch = current_arch().cuda
+        return (
+            arch is not None
+            and arch.is_sm(7, 0)
+            and set(self.layer_types) == {SLIDING_ATTENTION, SPARSE_ATTENTION}
+        )
+
+    @property
+    def hybrid_layer_pattern(self) -> list[int]:
+        return [int(layer == SLIDING_ATTENTION) for layer in self.layer_types]
 
     def is_sliding_layer(self, layer_id: int) -> bool:
         return self.layer_types[layer_id] == SLIDING_ATTENTION

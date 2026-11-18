@@ -5,14 +5,14 @@
 One Triton program per query token: the heads are padded into a 16-row MMA tile
 rather than into the grid, the online softmax stays in registers, and ``V`` is
 read as ``kv[:, :d_v]``, so there are no partials and no merge pass.
-``dsa/triton_sparse_mla.py`` is the gfx950-only FP8 sibling of this bf16 module.
+``dsa/triton_sparse_mla.py`` is the gfx950-only FP8 sibling of this FP16/BF16 module.
 
 Interface matches ``sglang.kernels.ops.attention.flash_mla_interface.flash_mla_sparse_fwd``::
 
-    q       [T, H, 576] bf16    (absorbed MLA: 512 nope + 64 rope)
-    kv      [S, 576]    bf16    (V is kv[:, :512])
+    q       [T, H, 576] FP16/BF16    (absorbed MLA: 512 nope + 64 rope)
+    kv      [S, 576]    FP16/BF16    (V is kv[:, :512])
     indices [T, topk]   int32   (-1 marks an invalid slot; no upper-bound check)
-    out     [T, H, 512] bf16
+    out     [T, H, 512] FP16/BF16
 
 A row of ``indices`` must not name the same KV position twice. Top-k selection
 cannot, so this holds for every DSA caller; it is stated because ``union``
@@ -57,6 +57,7 @@ def _sparse_mla_prefill_kernel(
     idx_ptr,
     len_ptr,
     o_ptr,
+    sink_ptr,
     sm_scale,
     topk,
     H: tl.constexpr,
@@ -65,6 +66,7 @@ def _sparse_mla_prefill_kernel(
     D_V: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IDX64: tl.constexpr,
+    HAS_SINK: tl.constexpr,
 ):
     t = tl.program_id(0)
     # Token offsets in int64: at h=128 the q offset t*H*D_QK passes 2^31 from
@@ -85,8 +87,13 @@ def _sparse_mla_prefill_kernel(
         qb + h[:, None] * D_QK + (D_V + dt)[None, :], mask=hmask[:, None], other=0.0
     )
 
-    m_i = tl.full([BLOCK_H], -float("inf"), tl.float32)
-    l_i = tl.zeros([BLOCK_H], tl.float32)
+    if HAS_SINK:
+        # The sink contributes probability mass, with a zero value vector.
+        m_i = tl.load(sink_ptr + h, mask=hmask, other=0.0).to(tl.float32)
+        l_i = tl.full([BLOCK_H], 1.0, tl.float32)
+    else:
+        m_i = tl.full([BLOCK_H], -float("inf"), tl.float32)
+        l_i = tl.zeros([BLOCK_H], tl.float32)
     acc = tl.zeros([BLOCK_H, D_V], tl.float32)
 
     n = tl.arange(0, BLOCK_N)
@@ -411,17 +418,18 @@ def sparse_mla_prefill(
     d_v=512,
     *,
     topk_length=None,
+    attn_sink=None,
     out=None,
     union=0,
     config=None,
     union_config=None,
     int64_indexing=None,
 ):
-    """Fused sparse-MLA prefill. Returns ``out`` ``[T, H, d_v]`` bf16.
+    """Fused FP16/BF16 sparse-MLA prefill, returning ``[T, H, d_v]``.
 
     Args:
-        q: ``[T, H, d_qk]`` bf16 query (absorbed MLA; ``d_qk = d_v + rope``).
-        kv: ``[S, d_qk]`` or ``[S, 1, d_qk]`` bf16 latent cache; ``V`` is
+        q: ``[T, H, d_qk]`` FP16/BF16 query (absorbed MLA; ``d_qk = d_v + rope``).
+        kv: ``[S, d_qk]`` or ``[S, 1, d_qk]`` matching FP16/BF16 cache; ``V`` is
             ``kv[:, :d_v]`` (no separate value gather).
         indices: ``[T, topk]`` or ``[T, 1, topk]`` int32 selected slots; ``-1``
             marks an invalid slot and is skipped. Every other value must be a
@@ -430,7 +438,8 @@ def sparse_mla_prefill(
         d_v: value head dim (512 for DSA).
         topk_length: optional ``[T]`` int32 per-row valid count. Computed from
             ``indices`` when omitted; pass it to skip that reduction.
-        out: optional preallocated ``[T, H, d_v]`` bf16 output.
+        attn_sink: optional FP32 per-head sink logits, with no value contribution.
+        out: optional preallocated ``[T, H, d_v]`` output.
         union: 0 (off), 2 or 4: share one gathered union index set across ``G``
             adjacent query tokens. Exact, not an approximation: an ownership
             bitmask restores each token's own softmax support.
@@ -447,16 +456,17 @@ def sparse_mla_prefill(
     T, h, d_qk = q.shape
     topk = indices.shape[-1]
     q, kv, indices = q.contiguous(), kv.contiguous(), indices.contiguous()
-    if kv.dtype != torch.bfloat16:
-        # An FP8 pool that reaches this entry (the PAGED transform leaves it
-        # packed) would otherwise fail in Triton compile or read fp8 bytes at a
-        # 576-element stride.
-        raise TypeError(
-            f"sparse_mla_prefill needs a bf16 KV cache, got {kv.dtype}; "
-            "dequantize the pool first."
-        )
+    if q.dtype != kv.dtype or kv.dtype not in (torch.float16, torch.bfloat16):
+        raise TypeError("sparse_mla_prefill expects matching FP16 or BF16 Q and KV")
+    if attn_sink is not None:
+        if attn_sink.shape != (h,) or attn_sink.dtype != torch.float32:
+            raise ValueError("sparse_mla_prefill expects one FP32 sink logit per head")
+        if union:
+            raise ValueError(
+                "sparse_mla_prefill union does not support attention sinks"
+            )
     if out is None:
-        out = torch.empty(T, h, d_v, dtype=torch.bfloat16, device=q.device)
+        out = torch.empty(T, h, d_v, dtype=q.dtype, device=q.device)
 
     if union in (2, 4) and _union_path(
         q=q,
@@ -491,6 +501,7 @@ def sparse_mla_prefill(
                 indices,
                 topk_length,
                 out,
+                attn_sink,
                 sm_scale,
                 topk,
                 H=h,
@@ -501,6 +512,7 @@ def sparse_mla_prefill(
                 num_warps=warps,
                 num_stages=ns_try,
                 IDX64=idx64,
+                HAS_SINK=attn_sink is not None,
             )
         except triton.runtime.errors.OutOfResources:
             # A larger head count (BLOCK_H) or a smaller smem budget can push the

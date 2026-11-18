@@ -69,6 +69,7 @@ from sglang.srt.managers.req_types import (
     MultimodalDataItem,
     MultimodalInputs,
 )
+from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_context import (
     get_attn_backend,
@@ -95,6 +96,7 @@ logger = logging.getLogger(__name__)
 def _is_volta() -> bool:
     arch = current_arch().cuda
     return arch is not None and arch.is_sm(7, 0)
+
 
 INDEX_DIM = 128
 FP8_MAX = 448.0
@@ -271,14 +273,21 @@ class FlashWindowIndexer(nn.Module):
             return q_lora.new_full((num_rows, self.index_topk), -1, dtype=torch.int32)
         metadata = get_attn_backend().get_indexer_metadata(layer_id, forward_batch)
         layout = _row_layout(forward_batch, metadata, num_rows)
-        return indexpool_kernels.window_indices(
+        pool = get_token_to_kv_pool()
+        ragged_offsets = _ragged_offsets(layout)
+        if isinstance(pool, SWAKVPool) and ragged_offsets is not None:
+            raise RuntimeError("Hy4 hybrid SWA requires paged top-k indices")
+        indices = indexpool_kernels.window_indices(
             layout.positions.contiguous(),
             metadata.get_page_table_64(),
             layout.row_to_batch.contiguous(),
-            _ragged_offsets(layout),
+            ragged_offsets,
             self.window,
             self.index_topk,
         )
+        if isinstance(pool, SWAKVPool):
+            indices = pool.translate_loc_from_full_to_swa(indices).to(torch.int32)
+        return indices
 
 
 class FlashIndexPool(nn.Module):
@@ -396,9 +405,11 @@ class FlashIndexPool(nn.Module):
 
     def _index_buffer(self):
         pool = get_token_to_kv_pool()
-        return pool.get_index_k_with_scale_buffer(
-            layer_id=self.layer_id
-        ), pool.index_page_size
+        index_pool = pool.full_kv_pool if isinstance(pool, SWAKVPool) else pool
+        return (
+            pool.get_index_k_with_scale_buffer(layer_id=self.layer_id),
+            index_pool.index_page_size,
+        )
 
     def _pool_groups(self, members, first_positions, write_slots):
         raw_buf = self._raw_keys
@@ -534,7 +545,9 @@ class FlashIndexPool(nn.Module):
         rows = positions.shape[0]
         chunk = max(1, self._LOGITS_BUDGET // (4 * num_groups)) if not decode else rows
 
-        def score(begin, end):
+        ragged_offsets = _ragged_offsets(layout)
+
+        def select_rows(begin, end):
             logits = indexpool_kernels.indexpool_logits(
                 q_fp8[begin:end],
                 weights[begin:end],
@@ -545,29 +558,56 @@ class FlashIndexPool(nn.Module):
                 page_size,
                 num_groups,
             )
-            return _topk(logits, count)
+            values, picked = _topk(logits, count)
+            return indexpool_kernels.indexpool_expand(
+                picked,
+                values,
+                positions[begin:end],
+                pages,
+                row_to_batch[begin:end],
+                ragged_offsets[begin:end] if ragged_offsets is not None else None,
+                self.index_topk,
+            )
+
+        parallel = get_parallel()
+        if (
+            not decode
+            and _is_volta()
+            and parallel.attn_tp_size > 1
+            and parallel.attn_cp_size == 1
+            and parallel.attn_dp_size == 1
+            and ragged_offsets is None
+            and rows >= 512
+            and num_groups >= 512
+        ):
+            # Projections, pooled keys and logical cache slots are replicated.
+            # Score disjoint query rows and gather only their selected IDs.
+            group = parallel.attn_tp_group
+            shard_rows = triton.cdiv(rows, group.world_size)
+            first = shard_rows * group.rank_in_group
+            last = min(first + shard_rows, rows)
+            local = torch.full(
+                (shard_rows, self.index_topk),
+                -1,
+                dtype=torch.int32,
+                device=positions.device,
+            )
+            for begin in range(first, last, chunk):
+                end = min(begin + chunk, last)
+                local[begin - first : end - first].copy_(select_rows(begin, end))
+            gathered = local.new_empty((shard_rows * group.world_size, self.index_topk))
+            group.all_gather_into_tensor(gathered, local)
+            return gathered[:rows]
 
         if chunk >= rows:
-            values, picked = score(0, rows)
-        else:
-            picked = torch.empty(
-                (rows, count), dtype=torch.int64, device=positions.device
-            )
-            values = torch.empty(
-                (rows, count), dtype=torch.float32, device=positions.device
-            )
-            for begin in range(0, rows, chunk):
-                end = min(rows, begin + chunk)
-                values[begin:end], picked[begin:end] = score(begin, end)
-        return indexpool_kernels.indexpool_expand(
-            picked,
-            values,
-            positions,
-            pages,
-            row_to_batch,
-            _ragged_offsets(layout),
-            self.index_topk,
+            return select_rows(0, rows)
+        selected = torch.empty(
+            (rows, self.index_topk), dtype=torch.int32, device=positions.device
         )
+        for begin in range(0, rows, chunk):
+            end = min(begin + chunk, rows)
+            selected[begin:end].copy_(select_rows(begin, end))
+        return selected
 
     def _query_rope_positions(self, positions, layout: "_RowLayout"):
         if self.rope_store is None:

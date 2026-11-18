@@ -176,16 +176,28 @@ _MINIMAX_BLAS_SHAPES = {
 # projections on cuBLAS. Routed block-FP8 experts use Marlin.
 _HY4_BLAS_SHAPES = {
     (1600, 3072),  # fused MLA query/KV input
-    (1024, 1024), (2048, 1024),  # query and indexer projections
-    (1792, 512), (3584, 512),  # unabsorbed key/value projections
-    (1024, 3072), (2048, 3072),  # attention output gate
-    (3072, 1024), (3072, 2048),  # attention output
-    (1536, 3072), (3072, 1536),  # replicated latent MoE transforms
-    (3456, 3072), (3072, 1728),  # first dense FFN
-    (384, 3072), (3072, 192),  # shared expert
-    (432, 1152), (1152, 144),  # vision QKV and attention output
-    (538, 1152), (1152, 538),  # vision FFN
+    (1024, 1024),
+    (2048, 1024),  # query and indexer projections
+    (1792, 512),
+    (3584, 512),  # unabsorbed key/value projections
+    (1024, 3072),
+    (2048, 3072),  # attention output gate
+    (3072, 1024),
+    (3072, 2048),  # attention output
+    (1536, 3072),
+    (3072, 1536),  # replicated latent MoE transforms
+    (3456, 3072),
+    (3072, 1728),  # first dense FFN
+    (384, 3072),
+    (3072, 192),  # shared expert
+    (432, 1152),
+    (1152, 144),  # vision QKV and attention output
+    (538, 1152),
+    (1152, 538),  # vision FFN
     (15104, 3072),  # vocabulary
+    (768, 6144),
+    (3072, 384),  # DFly hidden correction
+    (3072, 6144),  # DFly target hidden / token fusion
 }
 
 

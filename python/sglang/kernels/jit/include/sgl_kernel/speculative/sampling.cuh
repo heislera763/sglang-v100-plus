@@ -153,15 +153,18 @@ __global__ void TreeSpeculativeSamplingTargetOnly(
       relu_q_minus_p_vec[j] = max(q_vec[j] - p_vec[j], DType(0));
     }
 
-    DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
-        i,
-        d,
-        [&](DType x) { return x > 0; },
-        u,
-        relu_q_minus_p_vec,
-        aggregate_relu_q_minus_p,
-        last_valid_index,
-        &temp_storage);
+    const auto positive = [](DType x) { return x > 0; };
+    // FlashInfer 0.7 adds a thread-local fallback candidate to the scan API.
+    if constexpr (requires {
+                    DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+                        i, d, positive, u, relu_q_minus_p_vec, aggregate_relu_q_minus_p, last_valid_index, &temp_storage);
+                  }) {
+      DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+          i, d, positive, u, relu_q_minus_p_vec, aggregate_relu_q_minus_p, last_valid_index, &temp_storage);
+    } else {
+      DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+          i, d, positive, u, relu_q_minus_p_vec, aggregate_relu_q_minus_p, &temp_storage);
+    }
     if (aggregate_relu_q_minus_p > u) {
       break;
     }

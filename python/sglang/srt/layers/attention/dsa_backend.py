@@ -14,6 +14,7 @@ from typing import (
 )
 
 import torch
+
 from sglang.kernels.ops.attention.dsa.dequant_k_cache import (
     concat_cast_kv_fp8_pad,
     dequantize_k_cache_paged_dsa,
@@ -106,6 +107,8 @@ from sglang.srt.layers.dcp.layout import (
     filter_dcp_local_chunk_kv_indices,
     get_dcp_lens,
 )
+from sglang.srt.mem_cache.memory_pool import KVWriteLoc
+from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.runtime_context import (
@@ -2355,6 +2358,20 @@ class DeepseekSparseAttnBackend(
 
         self.forward_metadata = metadata
 
+    def _store_mla_kv(self, layer, forward_batch, k, k_rope):
+        pool = self.token_to_kv_pool
+        kv_layer = self.kv_layers.layer(layer.layer_id)
+        cache_loc = (
+            forward_batch.encoder_out_cache_loc
+            if layer.is_cross_attention
+            else forward_batch.out_cache_loc
+        )
+        if isinstance(pool, SWAKVPool) and not kv_layer.owner:
+            cache_loc = KVWriteLoc(
+                cache_loc, swa_loc=pool.translate_loc_from_full_to_swa(cache_loc)
+            )
+        kv_layer.store_mla(layer, cache_loc, k, k_rope)
+
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -2422,17 +2439,7 @@ class DeepseekSparseAttnBackend(
         if k is not None:
             assert v is not None
             if save_kv_cache:
-                cache_loc = (
-                    forward_batch.out_cache_loc
-                    if not layer.is_cross_attention
-                    else forward_batch.encoder_out_cache_loc
-                )
-                self.kv_layers.layer(layer.layer_id).store_mla(
-                    layer,
-                    cache_loc,
-                    k,
-                    k_rope,
-                )
+                self._store_mla_kv(layer, forward_batch, k, k_rope)
 
         # Use MHA kernel if in MHA_ONE_SHOT mode
         if self.use_mha:
@@ -2677,6 +2684,40 @@ class DeepseekSparseAttnBackend(
                     v_head_dim=layer.v_head_dim,
                     topk_length=metadata.dsa_cache_seqlens_int32,
                 )
+            if attn_sink is not None and self.device_capability == (7, 0):
+                if phase == "decode":
+                    return self._forward_triton_sink_decode(
+                        q_nope=q_nope,
+                        q_rope=q_rope,
+                        kv_cache=kv_cache,
+                        page_table_1=page_table_1,
+                        sm_scale=layer.scaling,
+                        v_head_dim=layer.v_head_dim,
+                        topk_length=metadata.dsa_cache_seqlens_int32,
+                        attn_sink=attn_sink,
+                    )
+
+                from sglang.kernels.ops.attention.dsa.triton_sparse_mla_prefill import (
+                    sparse_mla_prefill,
+                )
+
+                if q_all is None:
+                    q_all = torch.cat((q_nope, q_rope), dim=-1)
+                lengths = metadata.dsa_cache_seqlens_int32
+                if lengths is not None and lengths.shape[0] == page_table_1.shape[0]:
+                    lengths = lengths.clamp(max=page_table_1.shape[-1])
+                else:
+                    lengths = None
+                return sparse_mla_prefill(
+                    q_all,
+                    kv_cache,
+                    page_table_1,
+                    layer.scaling,
+                    layer.v_head_dim,
+                    topk_length=lengths,
+                    attn_sink=attn_sink,
+                    config=(16, 4, 1),
+                )
             return self._forward_flashmla_sparse(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2815,17 +2856,7 @@ class DeepseekSparseAttnBackend(
         if k is not None:
             assert v is not None
             if save_kv_cache:
-                cache_loc = (
-                    forward_batch.out_cache_loc
-                    if not layer.is_cross_attention
-                    else forward_batch.encoder_out_cache_loc
-                )
-                self.kv_layers.layer(layer.layer_id).store_mla(
-                    layer,
-                    cache_loc,
-                    k,
-                    k_rope,
-                )
+                self._store_mla_kv(layer, forward_batch, k, k_rope)
 
         # Do absorbed multi-latent attention
         kv_cache = self.kv_layers.read(layer.layer_id).key()
@@ -3074,20 +3105,6 @@ class DeepseekSparseAttnBackend(
         attn_sink: Optional[torch.Tensor] = None,
         q_parts: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        if attn_sink is not None and self.device_capability == (7, 0):
-            if q_parts is None:
-                q_parts = (q_all[..., :v_head_dim], q_all[..., v_head_dim:])
-            return self._forward_triton_sink_decode(
-                q_nope=q_parts[0],
-                q_rope=q_parts[1],
-                kv_cache=kv_cache,
-                page_table_1=page_table_1,
-                sm_scale=sm_scale,
-                v_head_dim=v_head_dim,
-                topk_length=topk_length,
-                kv_splits=1,
-                attn_sink=attn_sink,
-            )
         if q_parts is not None:
             q_all = concat_mla_absorb_q_general(*q_parts)
         num_tokens, num_heads, head_dim = q_all.shape
