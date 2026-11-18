@@ -39,7 +39,7 @@ from sglang.srt.multimodal.transport.feature_transport import (
 )
 from sglang.srt.runtime_context import publish, reset_context
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils.common import load_image
+from sglang.srt.multimodal.media_io import load_image
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -123,7 +123,7 @@ class TestFastImageProcessorDevice(CustomTestCase):
         processor = _make(base_gpu_id=0)
         processor.image_config = {"device": "cpu"}
         processor.disable_fast_image_processor = False
-        processor.mm_feature_transport = "cpu"
+        processor._feature_transport = MultimodalFeatureTransport("cpu", base_gpu_id=0, skip_mm_pool=True)
         processor.precompute_hash_before_cpu_transfer = False
         processor._tokenizer = SimpleNamespace(bos_token=None)
         processor._tokenizer_auto_adds_specials = False
@@ -165,7 +165,7 @@ class TestFastImageProcessorDevice(CustomTestCase):
 
         with (
             ThreadPoolExecutor(max_workers=1) as executor,
-            patch(f"{BASE}.load_image", side_effect=cpu_only_loader),
+            patch("sglang.srt.multimodal.multimodal_processor_mixin.load_image", side_effect=cpu_only_loader),
         ):
             processor.io_executor = executor
             tasks = processor._submit_mm_data_loading_tasks_simple(
