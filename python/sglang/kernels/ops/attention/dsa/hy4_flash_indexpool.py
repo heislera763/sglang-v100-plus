@@ -15,12 +15,36 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.kernels.arch import current_arch
+from sglang.kernels.ops.attention.dsa.sm70_indexer import _encode_e4m3fn
+from sglang.kernels.ops.attention.dsa.sm70_pool4_decode import _decode_e4m3fn
 from sglang.srt.layers.attention.dsa.kpool_fp8_index import _hadamard128
 
 INDEX_DIM = 128
 ROPE_DIM = 64
 FP8_MAX = 448.0
 TOKENS_PER_PAGE = 64
+
+
+def _software_fp8() -> bool:
+    arch = current_arch().cuda
+    return arch is not None and arch.is_sm(7, 0)
+
+
+@triton.jit
+def _store_e4m3(x, SOFTWARE_FP8: tl.constexpr):
+    if SOFTWARE_FP8:
+        return _encode_e4m3fn(x)
+    else:
+        return x.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
+
+
+@triton.jit
+def _load_e4m3(x, SOFTWARE_FP8: tl.constexpr):
+    if SOFTWARE_FP8:
+        return _decode_e4m3fn(x).to(tl.float16)
+    else:
+        return x.to(tl.float8e4nv, bitcast=True).to(tl.bfloat16)
 
 
 @triton.jit
@@ -79,6 +103,7 @@ def _query_kernel(
     MROPE: tl.constexpr,
     S1: tl.constexpr,
     S2: tl.constexpr,
+    SOFTWARE_FP8: tl.constexpr,
 ):
     r = tl.program_id(0)
     h = tl.program_id(1)
@@ -96,7 +121,7 @@ def _query_kernel(
     else:
         pos = tl.load(pos_ptr + r)
     q, scale = _rope_quant_row(x, pos, inv_freq_ptr)
-    tl.store(q_out_ptr + (r * H + h) * 128 + d, q.to(q_out_ptr.dtype.element_ty))
+    tl.store(q_out_ptr + (r * H + h) * 128 + d, _store_e4m3(q, SOFTWARE_FP8))
     hw = tl.load(hw_ptr + r * hw_stride_r + h).to(tl.float32)
     tl.store(w_out_ptr + r * H + h, hw * weight_scale * scale)
 
@@ -134,7 +159,7 @@ def indexpool_query(
         positions,
         head_weights,
         inv_freq,
-        q_out,
+        q_out.view(torch.uint8),
         w_out,
         query.stride(0),
         query.stride(1),
@@ -144,6 +169,7 @@ def indexpool_query(
         num_heads**-0.5 * INDEX_DIM**-0.5,
         H=num_heads,
         num_warps=1,
+        SOFTWARE_FP8=_software_fp8(),
         **mrope,
     )
     return q_out, w_out
@@ -170,6 +196,7 @@ def _pool_write_kernel(
     MROPE: tl.constexpr,
     S1: tl.constexpr,
     S2: tl.constexpr,
+    SOFTWARE_FP8: tl.constexpr,
 ):
     g = tl.program_id(0)
     dst = tl.load(write_ptr + g)
@@ -204,6 +231,7 @@ def _pool_write_kernel(
         buf_page_stride,
         eps,
         PAGE,
+        SOFTWARE_FP8,
     )
 
 
@@ -223,6 +251,7 @@ def _pool_group(
     buf_page_stride,
     eps,
     PAGE: tl.constexpr,
+    SOFTWARE_FP8: tl.constexpr,
 ):
     rows = tl.arange(0, 16)
     d = tl.arange(0, 128)
@@ -254,7 +283,7 @@ def _pool_group(
     page = dst // PAGE
     row = dst % PAGE
     base = buf_ptr + page * buf_page_stride
-    tl.store(base + row * 128 + d, q.to(tl.float8e4nv).to(tl.uint8, bitcast=True))
+    tl.store(base + row * 128 + d, _store_e4m3(q, SOFTWARE_FP8))
     scale_ptr = (base + PAGE * 128 + row * 4).to(tl.pointer_type(tl.float32))
     tl.store(scale_ptr, scale)
 
@@ -286,6 +315,7 @@ def _decode_update_kernel(
     MROPE: tl.constexpr,
     S1: tl.constexpr,
     S2: tl.constexpr,
+    SOFTWARE_FP8: tl.constexpr,
 ):
     """Decode: normalize and store each row's raw key, then pool the row's group
     if this token completes it."""
@@ -296,7 +326,7 @@ def _decode_update_kernel(
     key = x * tl.rsqrt(tl.sum(x * x, axis=0) / 128 + key_eps) * w
     slot = tl.load(out_loc_ptr + r).to(tl.int64)
     slot = tl.minimum(tl.maximum(slot, 0), raw_slots - 1)
-    tl.store(raw_ptr + slot * 128 + d, key.to(tl.bfloat16))
+    tl.store(raw_ptr + slot * 128 + d, key.to(raw_ptr.dtype.element_ty))
     pos = tl.load(seqlen_ptr + r).to(tl.int64) - 1
     if (pos >= 0) & (pos % RATIO == RATIO - 1):
         # The other threads re-read this row's key from global memory.
@@ -337,6 +367,7 @@ def _decode_update_kernel(
             buf_page_stride,
             eps,
             PAGE,
+            SOFTWARE_FP8,
         )
 
 
@@ -396,6 +427,7 @@ def indexpool_decode_update(
         MROPE=mrope,
         S1=mrope_section[1] if mrope else 0,
         S2=mrope_section[2] if mrope else 0,
+        SOFTWARE_FP8=_software_fp8(),
         num_warps=4,
     )
 
@@ -443,6 +475,7 @@ def indexpool_pool_write(
         RATIO=member_slots.shape[1],
         PAGE=page_size,
         num_warps=4,
+        SOFTWARE_FP8=_software_fp8(),
         **mrope,
     )
 
@@ -464,6 +497,7 @@ def _logits_kernel(
     RATIO: tl.constexpr,
     PAGE: tl.constexpr,
     BLOCK_G: tl.constexpr,
+    SOFTWARE_FP8: tl.constexpr,
 ):
     r = tl.program_id(0)
     gb = tl.program_id(1)
@@ -486,14 +520,13 @@ def _logits_kernel(
     krow = slot % PAGE
     d = tl.arange(0, 128)
     kbase = buf_ptr + kpage * buf_page_stride
-    k = (
+    k = _load_e4m3(
         tl.load(
             kbase[:, None] + krow[:, None] * 128 + d[None, :],
             mask=live[:, None],
             other=0,
-        )
-        .to(tl.float8e4nv, bitcast=True)
-        .to(tl.bfloat16)
+        ),
+        SOFTWARE_FP8,
     )
     ks = tl.load(
         (kbase + PAGE * 128 + krow * 4).to(tl.pointer_type(tl.float32)),
@@ -501,7 +534,10 @@ def _logits_kernel(
         other=0.0,
     )
     hs = tl.arange(0, H)
-    q = tl.load(q_ptr + (r * H + hs[:, None]) * 128 + d[None, :]).to(tl.bfloat16)
+    q = _load_e4m3(
+        tl.load(q_ptr + (r * H + hs[:, None]) * 128 + d[None, :]),
+        SOFTWARE_FP8,
+    )
     w = tl.load(w_ptr + r * H + hs)
     s = tl.dot(q, tl.trans(k))  # [H, BLOCK_G] fp32
     s = tl.maximum(s, 0.0) * w[:, None]
@@ -643,7 +679,8 @@ def indexpool_logits(
     if rows == 0 or num_groups == 0:
         return out
     block = 64
-    if rows >= _LOGITS_ROW_BLOCK_MIN_ROWS:
+    software_fp8 = _software_fp8()
+    if not software_fp8 and rows >= _LOGITS_ROW_BLOCK_MIN_ROWS:
         block_r, block, warps = _LOGITS_ROWS_CONFIG
         _logits_rows_kernel[
             (triton.cdiv(rows, block_r), triton.cdiv(num_groups, block))
@@ -669,7 +706,7 @@ def indexpool_logits(
         )
         return out
     _logits_kernel[(rows, triton.cdiv(num_groups, block))](
-        q_fp8,
+        q_fp8.view(torch.uint8),
         weights,
         pages,
         row_to_batch,
@@ -684,6 +721,7 @@ def indexpool_logits(
         RATIO=4,
         PAGE=page_size,
         BLOCK_G=block,
+        SOFTWARE_FP8=software_fp8,
         num_warps=4,
     )
     return out

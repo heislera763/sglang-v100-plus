@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import triton
 from torch import nn
 
+from sglang.kernels.arch import current_arch
 from sglang.kernels.ops.attention.dsa import hy4_flash_indexpool as indexpool_kernels
 from sglang.kernels.ops.embeddings.hy4_flash_engram import (
     hy4_flash_engram_combine,
@@ -89,6 +90,11 @@ from sglang.srt.runtime_context import get_parallel, get_spec
 from sglang.srt.utils import BumpAllocator
 
 logger = logging.getLogger(__name__)
+
+
+def _is_volta() -> bool:
+    arch = current_arch().cuda
+    return arch is not None and arch.is_sm(7, 0)
 
 INDEX_DIM = 128
 FP8_MAX = 448.0
@@ -332,9 +338,8 @@ class FlashIndexPool(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.token_key_projection",
         )
-        # A plain bf16 nn.RMSNorm, as in the reference, so the raw keys round the
-        # same way.
-        self.token_key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps, dtype=torch.bfloat16)
+        dtype = torch.float16 if _is_volta() else torch.bfloat16
+        self.token_key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps, dtype=dtype)
         self.key_value_projection = nn.Linear(
             INDEX_DIM, INDEX_DIM, bias=False, dtype=torch.float32
         )
@@ -363,7 +368,9 @@ class FlashIndexPool(nn.Module):
             pool = get_token_to_kv_pool()
             slots = pool.size + 2 * pool.page_size + 1
             self._raw_keys = torch.zeros(
-                (slots, INDEX_DIM), dtype=torch.bfloat16, device=device
+                (slots, INDEX_DIM),
+                dtype=self.token_key_norm.weight.dtype,
+                device=device,
             )
         return self._raw_keys
 
@@ -609,6 +616,8 @@ def _topk(logits: torch.Tensor, k: int):
     if logits.shape[1] <= k:
         idx = torch.arange(logits.shape[1], device=logits.device)
         return logits, idx.expand(logits.shape[0], -1).contiguous()
+    if _is_volta():
+        return torch.topk(logits, k, sorted=False)
     import flashinfer
 
     return flashinfer.top_k(logits, k)
@@ -820,6 +829,7 @@ class FlashEngramEmbedding(nn.Module):
         self.num_embeddings = sum(sizes)
         self.dim = dim
         self.rows = self.vocab_end - self.vocab_start
+        self.host_resident = _is_volta()
         # The table dtype (bf16, or fp8 with per-row bf16 scales) is taken from
         # the checkpoint when it loads.
         self.weight = nn.Parameter(
@@ -833,10 +843,21 @@ class FlashEngramEmbedding(nn.Module):
         if value.shape[0] != self.num_embeddings:
             raise ValueError(f"Invalid Engram table rows: {tuple(value.shape)}")
         param = getattr(self, leaf)
-        param.data = torch.empty(
-            (self.rows, *value.shape[1:]), dtype=value.dtype, device=param.device
-        )
-        param.data.copy_(value[self.vocab_start : self.vocab_end])
+        shape = (self.rows, *value.shape[1:])
+        shard = value[self.vocab_start : self.vocab_end]
+        if self.host_resident and leaf == "weight":
+            if value.dtype != torch.bfloat16:
+                raise ValueError("Volta Hy4 Engram expects the official BF16 tables")
+            # Each rank owns disjoint hash heads. Copy only its part to mapped
+            # host memory and let the device gather the selected rows.
+            storage = torch.empty(
+                shape, dtype=value.dtype, device="cpu", pin_memory=True
+            )
+            storage.copy_(shard)
+            self.weight = nn.Parameter(storage, requires_grad=False)
+        else:
+            param.data = torch.empty(shape, dtype=value.dtype, device=param.device)
+            param.data.copy_(shard)
 
     def forward(self, hashes: torch.Tensor) -> torch.Tensor:
         local = hashes[:, self.head_start : self.head_end].to(torch.int64)
@@ -870,27 +891,28 @@ class FlashEngram(nn.Module):
         self.start = self.multi_head_embedding.head_start * self.head_dim
         self.stop = self.multi_head_embedding.head_end * self.head_dim
         self.rank = get_tensor_model_parallel_rank()
+        activation_dtype = torch.float16 if _is_volta() else torch.bfloat16
         self.lookup_gamma = nn.Parameter(
-            torch.ones(local, self.head_dim, dtype=torch.bfloat16)
+            torch.ones(local, self.head_dim, dtype=activation_dtype)
         )
         self.value_proj = nn.Linear(
-            local * self.head_dim, self.hidden_size, dtype=torch.bfloat16
+            local * self.head_dim, self.hidden_size, dtype=activation_dtype
         )
         self.key_projs = nn.ModuleList(
-            nn.Linear(local * self.head_dim, self.hidden_size, dtype=torch.bfloat16)
+            nn.Linear(local * self.head_dim, self.hidden_size, dtype=activation_dtype)
             for _ in range(self.hc_mult)
         )
         self.norm_key = nn.Parameter(
-            torch.ones(self.hc_mult, self.hidden_size, dtype=torch.bfloat16)
+            torch.ones(self.hc_mult, self.hidden_size, dtype=activation_dtype)
         )
         self.norm_query = nn.Parameter(
-            torch.ones(self.hc_mult, self.hidden_size, dtype=torch.bfloat16)
+            torch.ones(self.hc_mult, self.hidden_size, dtype=activation_dtype)
         )
         self.unified_pre_gamma = nn.Parameter(
-            torch.ones(self.hidden_size, dtype=torch.bfloat16)
+            torch.ones(self.hidden_size, dtype=activation_dtype)
         )
         self.unified_per_hc_scales = nn.Parameter(
-            torch.zeros(self.hc_mult, self.hidden_size, dtype=torch.bfloat16)
+            torch.zeros(self.hc_mult, self.hidden_size, dtype=activation_dtype)
         )
         for projection in [self.value_proj, *self.key_projs]:
             projection.weight.weight_loader = self._load_projection

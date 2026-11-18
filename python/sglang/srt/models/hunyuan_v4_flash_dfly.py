@@ -368,8 +368,8 @@ class HYV4FlashDFly(nn.Module):
 
 def _split_kv_b_proj(attn) -> None:
     w = attn.kv_b_proj.weight
-    if w.dtype != torch.bfloat16:
-        raise ValueError("The DFly kv_b_proj must be bf16")
+    if w.dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError("The DFly kv_b_proj must be BF16 or FP16")
     w_kc, w_vc = w.unflatten(0, (-1, attn.qk_nope_head_dim + attn.v_head_dim)).split(
         [attn.qk_nope_head_dim, attn.v_head_dim], dim=1
     )

@@ -52,6 +52,10 @@ def _validate_input_dtypes(
     """
     q_dtype = q_nope.dtype
     kv_dtype = kv.dtype
+    if q_dtype == kv_dtype == q_rope.dtype == torch.float16:
+        return False
+    if torch.float16 in (q_dtype, kv_dtype, q_rope.dtype):
+        raise ValueError("FP16 sparse MLA requires FP16 queries and KV")
     if q_rope.dtype != q_dtype:
         raise ValueError(
             "Triton sparse MLA requires q_nope and q_rope to have the same "
@@ -695,7 +699,10 @@ def _sparse_mla_fused_kernel(
     dt = tl.arange(0, D_TAIL)
     g = tl.arange(0, _G)
 
-    input_type = kv_ptr.dtype.element_ty if USE_FP8_DOT else tl.bfloat16
+    if USE_FP8_DOT or kv_ptr.dtype.element_ty == tl.float16:
+        input_type = kv_ptr.dtype.element_ty
+    else:
+        input_type = tl.bfloat16
     if USE_FP8_DOT:
         p_dot_scale = 1.0 / fp8_max
     else:
@@ -828,25 +835,25 @@ def _sparse_mla_fused_kernel(
     o_base = out_ptr + t * H * D_V
     tl.store(
         o_base + h_offs[:, None] * D_V + g[None, :],
-        acc0.to(tl.bfloat16),
+        acc0.to(out_ptr.dtype.element_ty),
         mask=h_mask[:, None],
     )
     if NUM_GROUPS >= 2:
         tl.store(
             o_base + h_offs[:, None] * D_V + (_G + g)[None, :],
-            acc1.to(tl.bfloat16),
+            acc1.to(out_ptr.dtype.element_ty),
             mask=h_mask[:, None],
         )
     if NUM_GROUPS >= 3:
         tl.store(
             o_base + h_offs[:, None] * D_V + (2 * _G + g)[None, :],
-            acc2.to(tl.bfloat16),
+            acc2.to(out_ptr.dtype.element_ty),
             mask=h_mask[:, None],
         )
     if NUM_GROUPS >= 4:
         tl.store(
             o_base + h_offs[:, None] * D_V + (3 * _G + g)[None, :],
-            acc3.to(tl.bfloat16),
+            acc3.to(out_ptr.dtype.element_ty),
             mask=h_mask[:, None],
         )
 
@@ -889,7 +896,10 @@ def _sparse_mla_split_k_kernel(
     dt = tl.arange(0, D_TAIL)
     g = tl.arange(0, _G)
 
-    input_type = kv_ptr.dtype.element_ty if USE_FP8_DOT else tl.bfloat16
+    if USE_FP8_DOT or kv_ptr.dtype.element_ty == tl.float16:
+        input_type = kv_ptr.dtype.element_ty
+    else:
+        input_type = tl.bfloat16
     if USE_FP8_DOT:
         p_dot_scale = 1.0 / fp8_max
     else:
@@ -1115,7 +1125,7 @@ def _sparse_mla_reduce_kernel(
 
     tl.store(
         out_ptr + t * H * D_V + h * D_V + d_offs,
-        out.to(tl.bfloat16),
+        out.to(out_ptr.dtype.element_ty),
         mask=d_mask,
     )
     if STORE_LSE:
@@ -1308,6 +1318,8 @@ def triton_sparse_mla_fwd(
 
     Returns [1, seq, H, d_v] bf16 to match tilelang_sparse_fwd.
     """
+    if torch.float16 in (q_nope.dtype, q_rope.dtype, kv.dtype):
+        raise ValueError("Use the sink-aware split-K entry point for FP16 sparse MLA")
     seq = q_nope.shape[0]
     H = q_nope.shape[1]
     num_cu = _cu_count(q_nope.device)

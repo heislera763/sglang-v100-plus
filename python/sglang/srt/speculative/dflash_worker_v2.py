@@ -212,15 +212,6 @@ class _DflashDraftSampler:
         self.out[:n].copy_(selected.view(-1))
 
 
-def _chain_accept_indices(commit_lens: torch.Tensor, block_size: int) -> torch.Tensor:
-    """[bs, block_size] flat offsets into the verify out_cache_loc of each
-    committed chain position, -1 past the commit length (EAGLE accept_index
-    layout at topk 1)."""
-    steps = torch.arange(block_size, device=commit_lens.device)
-    row_offsets = torch.arange(commit_lens.numel(), device=commit_lens.device)
-    flat = row_offsets[:, None] * block_size + steps
-    return torch.where(steps < commit_lens[:, None], flat, -1)
-
 
 def _resolve_dflash_embedding_module(draft_model, target_model):
     if getattr(draft_model, "is_nemotron_35_draft", False):

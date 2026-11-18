@@ -34,6 +34,7 @@ def _engram_lookup_kernel(
     D: tl.constexpr,
     BLOCK_D: tl.constexpr,
     HAS_SCALE: tl.constexpr,
+    MAPPED_HOST: tl.constexpr,
 ):
     t = tl.program_id(0).to(tl.int64)
     h = tl.program_id(1)
@@ -41,13 +42,15 @@ def _engram_lookup_kernel(
     mask = d < D
     idx = tl.load(hash_ptr + t * hash_stride + head_start + h).to(tl.int64)
     row = tl.minimum(tl.maximum(idx - vocab_start, 0), rows - 1)
+    if MAPPED_HOST:
+        table_ptr = table_ptr.to(tl.int64).to(tl.pointer_type(tl.bfloat16))
     x = tl.load(table_ptr + row * D + d, mask=mask, other=0.0).to(tl.float32)
     if HAS_SCALE:
         x = x * tl.load(scale_ptr + row).to(tl.float32)
     x = tl.where(idx < 0, 0.0, x)
     gamma = tl.load(gamma_ptr + h * D + d, mask=mask, other=0.0).to(tl.float32)
     y = x * tl.rsqrt(tl.sum(x * x, axis=0) / D + eps) * gamma
-    tl.store(out_ptr + t * HEADS * D + h * D + d, y.to(tl.bfloat16), mask=mask)
+    tl.store(out_ptr + t * HEADS * D + h * D + d, y.to(out_ptr.dtype.element_ty), mask=mask)
 
 
 def hy4_flash_engram_lookup(
@@ -63,16 +66,19 @@ def hy4_flash_engram_lookup(
     heads; a negative hash gives a zero row."""
     tokens = hashes.shape[0]
     dim = table.shape[1]
-    out = torch.empty((tokens, heads * dim), dtype=torch.bfloat16, device=hashes.device)
+    out = torch.empty((tokens, heads * dim), dtype=gamma.dtype, device=hashes.device)
     if tokens == 0 or heads == 0:
         return out
     assert hashes.stride(1) == 1 and table.is_contiguous() and gamma.is_contiguous()
     has_scale = table_scale is not None and table_scale.numel() > 0
+    mapped_host = table.device.type == "cpu"
+    if mapped_host and (not table.is_pinned() or table.dtype != torch.bfloat16):
+        raise ValueError("Mapped Engram tables must be pinned BF16 tensors")
     _engram_lookup_kernel[(tokens, heads)](
         hashes,
         hashes.stride(0),
-        table,
-        table_scale if has_scale else table,
+        table.data_ptr() if mapped_host else table,
+        table_scale if has_scale else gamma,
         gamma,
         out,
         head_start,
@@ -83,6 +89,7 @@ def hy4_flash_engram_lookup(
         D=dim,
         BLOCK_D=triton.next_power_of_2(dim),
         HAS_SCALE=has_scale,
+        MAPPED_HOST=mapped_host,
         num_warps=1,
     )
     return out

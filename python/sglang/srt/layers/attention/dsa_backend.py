@@ -3074,6 +3074,20 @@ class DeepseekSparseAttnBackend(
         attn_sink: Optional[torch.Tensor] = None,
         q_parts: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if attn_sink is not None and self.device_capability == (7, 0):
+            if q_parts is None:
+                q_parts = (q_all[..., :v_head_dim], q_all[..., v_head_dim:])
+            return self._forward_triton_sink_decode(
+                q_nope=q_parts[0],
+                q_rope=q_parts[1],
+                kv_cache=kv_cache,
+                page_table_1=page_table_1,
+                sm_scale=sm_scale,
+                v_head_dim=v_head_dim,
+                topk_length=topk_length,
+                kv_splits=1,
+                attn_sink=attn_sink,
+            )
         if q_parts is not None:
             q_all = concat_mla_absorb_q_general(*q_parts)
         num_tokens, num_heads, head_dim = q_all.shape
@@ -3769,6 +3783,8 @@ class DeepseekSparseAttnBackend(
     _TRITON_SINK_DECODE_MAX_WORK = 64 * 1024
 
     def _use_triton_sink_decode(self, q_nope, kv_cache, page_table_1, attn_sink):
+        if attn_sink is not None and self.device_capability == (7, 0):
+            return True
         return (
             attn_sink is not None
             and _is_cuda
@@ -3789,6 +3805,7 @@ class DeepseekSparseAttnBackend(
         v_head_dim: int,
         topk_length: Optional[torch.Tensor],
         attn_sink: torch.Tensor,
+        kv_splits: Optional[int] = None,
     ) -> torch.Tensor:
         from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
             triton_sparse_mla_decode_splitk,
@@ -3810,6 +3827,7 @@ class DeepseekSparseAttnBackend(
             d_v=v_head_dim,
             workspace=workspace,
             lengths=lengths,
+            kv_splits=kv_splits,
             attn_sink=attn_sink,
         ).squeeze(0)
 

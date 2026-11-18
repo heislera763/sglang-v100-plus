@@ -506,7 +506,16 @@ def _dsa_kv_cache_dtype_default(view: Any) -> dict:
 
     import torch
 
-    major, _ = torch.cuda.get_device_capability()
+    major, minor = torch.cuda.get_device_capability()
+    if (major, minor) == (7, 0) and (
+        hf_config.architectures[0] == "HYV4FlashForConditionalGeneration"
+    ):
+        if view.dtype not in ("half", "float16") or view.kv_cache_dtype != "auto":
+            raise ValueError(
+                "Volta Hy4 Flash requires --dtype float16 and --kv-cache-dtype auto"
+            )
+        # Auto follows the model dtype in the KV allocator.
+        return {}
 
     # If user specified a backend but didn't explicitly set kv_cache_dtype,
     # suggest them to be explicit about kv_cache_dtype to avoid surprises

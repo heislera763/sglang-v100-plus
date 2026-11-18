@@ -181,6 +181,7 @@ def triton_sparse_mla_decode_splitk(
     else:
         kv_splits = min(kv_splits, max_kv_splits)
 
+    output_dtype = torch.float16 if q_nope.dtype == torch.float16 else torch.bfloat16
     qk_scale = float(sm_scale) * _LOG2E
     lse = (
         torch.empty(bs, H, device=q_nope.device, dtype=torch.float32)
@@ -193,7 +194,7 @@ def triton_sparse_mla_decode_splitk(
         fused_num_warps = 4
         if optimize_gfx950_fp8:
             fused_num_warps = _gfx950_sparse_mla_num_warps(base_ctas, 1, num_cu)
-        out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=torch.bfloat16)
+        out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=output_dtype)
         with _no_async_copy():
             _sparse_mla_fused_kernel[(bs, n_head_blocks)](
                 q_nope,
@@ -253,7 +254,7 @@ def triton_sparse_mla_decode_splitk(
     lse_partial, acc_partial = _get_splitk_bufs(
         bs, kv_splits, h_padded, d_v, q_nope.device, workspace
     )
-    out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=torch.bfloat16)
+    out = torch.empty(bs, H, d_v, device=q_nope.device, dtype=output_dtype)
 
     grid_split = (bs, n_head_blocks, kv_splits)
     with _no_async_copy():
