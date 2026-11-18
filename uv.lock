@@ -162,6 +162,16 @@ wheels = [
 ]
 
 [[package]]
+name = "blake3"
+version = "1.0.11"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/fd/1ad6581856cbd018072b2b5debf9d8aa3928b579bedd5d170b60e5a20256/blake3-1.0.11.tar.gz", hash = "sha256:d73c0a87304d41045f6753a922113bede3ab09eda2d20371566a5bbe357c3deb", size = 117377, upload-time = "2026-10-08T08:57:41.987Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/e3/0578c88bf4c268db7f529620788a6db9478927b1c1412ca2c19124bba864/blake3-1.0.11-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:33424c686b291c7682b5816fe9320466dbc0a457ef7e15c273c804a2d70fea70", size = 381348, upload-time = "2026-10-08T08:55:48.503Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/2b/0de6181bcb9588edec87ad59d8d4a46b0b9ad3910063524096ba51e3739d/blake3-1.0.11-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:121e727827291ad48773eaaf1e2c5ab07973e45891f2e24455ae4ec022ac7df9", size = 589182, upload-time = "2026-10-08T08:55:52.786Z" },
+]
+
+[[package]]
 name = "blobfile"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -406,6 +416,15 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/11/79/936af42edf90a7bd4e41a6cac89c913d4b47fa48a26b042d5129a9242ee3/decord-0.6.0-py3-none-manylinux2010_x86_64.whl", hash = "sha256:51997f20be8958e23b7c4061ba45d0efcd86bffd5fe81c695d0befee0d442976", size = 13602299, upload-time = "2021-06-14T21:30:55.486Z" },
+]
+
+[[package]]
+name = "deepseek-recipe"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/9d/0b86feb9f32d35ff93f9404fb797a4ab40eb6d9616f87ed5c5b3613e26d3/deepseek_recipe-0.2.0.tar.gz", hash = "sha256:5dfd65dc201004f6382b13c8432a406cd2af7188831944ac5cef22f260111f68", size = 249190, upload-time = "2026-10-20T05:15:50.31Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/50/bfc176a196e438509e5821b9b5e668d866ccc791aefc01fa1119e857d8e9/deepseek_recipe-0.2.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:259812bf382bc82668b672707c5922095cc4f5f60a6c514ff89640bb62a746f7", size = 12846711, upload-time = "2026-10-20T05:15:29.717Z" },
 ]
 
 [[package]]
@@ -1957,23 +1976,50 @@ wheels = [
 ]
 
 [[package]]
+name = "sgl-fa3"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/ae/47991a2be7ffa75ec859a5324e98032e4bd4b5c233dd9c95e76541def32e/sgl_fa3-0.1.0-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:7e8c3de40bcfd8c73b3d3f6328e8a8dda77858919eb00b8a742d510ddb01d715", size = 57401800, upload-time = "2026-11-13T23:01:21.138Z" },
+]
+
+[[package]]
+name = "sgl-flash-mla"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/5e/4d6f856b64dd3063bbd9bd9355c35270c67700693b65f751989e27767989/sgl_flash_mla-1.0.5-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:f6513d46ad005283063f5fe9af7acab098ed77fee3e6d88423a687a6a811a84f", size = 10120700, upload-time = "2026-11-11T21:31:32.122Z" },
+]
+
+[[package]]
 name = "sglang"
 source = { editable = "python" }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "apache-tvm-ffi" },
+    { name = "blake3" },
     { name = "blobfile" },
     { name = "build" },
     { name = "compressed-tensors" },
     { name = "cuda-python" },
     { name = "datasets" },
+    { name = "deepseek-recipe" },
     { name = "distro" },
     { name = "easydict" },
     { name = "einops" },
     { name = "fastapi" },
     { name = "flashinfer-python" },
     { name = "gguf" },
+    { name = "grpcio" },
+    { name = "grpcio-health-checking" },
+    { name = "grpcio-reflection" },
     { name = "interegular" },
     { name = "ipython" },
     { name = "kernels" },
@@ -1994,10 +2040,12 @@ dependencies = [
     { name = "partial-json-parser" },
     { name = "pillow" },
     { name = "prometheus-client" },
+    { name = "protobuf" },
     { name = "psutil" },
     { name = "py-spy" },
     { name = "pybase64" },
     { name = "pydantic" },
+    { name = "python-dateutil" },
     { name = "python-multipart" },
     { name = "pyzmq" },
     { name = "quack-kernels" },
@@ -2006,12 +2054,14 @@ dependencies = [
     { name = "scipy" },
     { name = "sentencepiece" },
     { name = "setproctitle" },
+    { name = "sgl-fa3" },
+    { name = "sgl-flash-mla" },
     { name = "sglang-kernel" },
-    { name = "smg-grpc-servicer" },
     { name = "soundfile" },
     { name = "tiktoken" },
     { name = "tilelang" },
     { name = "timm" },
+    { name = "tml-renderers" },
     { name = "tokenizers" },
     { name = "torch" },
     { name = "torch-memory-saver" },
@@ -2040,6 +2090,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'diffusion'", specifier = "==16.1.0" },
     { name = "av", marker = "extra == 'test'", specifier = "==16.1.0" },
     { name = "bitsandbytes", marker = "extra == 'test'" },
+    { name = "blake3", specifier = ">=1.0.0" },
     { name = "blobfile", specifier = "==3.0.0" },
     { name = "build" },
     { name = "cache-dit", marker = "extra == 'diffusion'", specifier = "==1.5.1" },
@@ -2049,6 +2100,7 @@ requires-dist = [
     { name = "cuda-python", specifier = ">=13.0" },
     { name = "datasets" },
     { name = "decord2", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'linux') or (platform_machine == 'armv7l' and sys_platform == 'linux')" },
+    { name = "deepseek-recipe", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'", specifier = "==0.2.0" },
     { name = "diff-cover", marker = "extra == 'test'" },
     { name = "diffusers", marker = "extra == 'diffusion'", specifier = "==0.37.0" },
     { name = "distro" },
@@ -2057,12 +2109,14 @@ requires-dist = [
     { name = "expecttest", marker = "extra == 'test'" },
     { name = "fastapi" },
     { name = "fastokens", marker = "extra == 'fastokens'", specifier = ">=0.3.2" },
-    { name = "flash-attn-4", specifier = ">=4.0.0b18" },
-    { name = "flashinfer-python", extras = ["cu13"], specifier = "==0.7.2" },
+    { name = "flashinfer-python", extras = ["cu13"], specifier = "==0.7.4" },
     { name = "gguf" },
     { name = "granian", marker = "extra == 'http2'", specifier = ">=2.6.0" },
     { name = "granian", marker = "extra == 'test'", specifier = ">=2.6.0" },
-    { name = "humming-kernels", extras = ["cu13"], specifier = "==0.1.12" },
+    { name = "grpcio", specifier = ">=1.81.1" },
+    { name = "grpcio-health-checking", specifier = ">=1.81.1" },
+    { name = "grpcio-reflection", specifier = ">=1.81.1" },
+    { name = "humming-kernels", extras = ["cu13"], specifier = "==0.1.18" },
     { name = "imageio", marker = "extra == 'diffusion'", specifier = "==2.36.0" },
     { name = "imageio-ffmpeg", marker = "extra == 'diffusion'", specifier = "==0.5.1" },
     { name = "instanttensor", marker = "extra == 'instanttensor'", specifier = ">=0.1.9" },
@@ -2102,9 +2156,10 @@ requires-dist = [
     { name = "parameterized", marker = "extra == 'test'" },
     { name = "partial-json-parser" },
     { name = "peft", marker = "extra == 'test'", specifier = ">=0.18.0" },
-    { name = "pillow" },
+    { name = "pillow", specifier = "<13" },
     { name = "polars", marker = "extra == 'test'" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
+    { name = "protobuf", specifier = ">=6.33.5" },
     { name = "psutil" },
     { name = "py-spy" },
     { name = "pybase64" },
@@ -2112,6 +2167,7 @@ requires-dist = [
     { name = "pymupdf", marker = "extra == 'test'" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "python-dateutil", specifier = "<3" },
     { name = "python-multipart" },
     { name = "pyyaml", marker = "extra == 'diffusion'", specifier = "==6.0.1" },
     { name = "pyzmq", specifier = ">=25.1.2" },
@@ -2128,23 +2184,25 @@ requires-dist = [
     { name = "sentencepiece", specifier = "==0.2.1" },
     { name = "setproctitle" },
     { name = "sgl-deep-ep", specifier = "==0.1.2.post1" },
-    { name = "sgl-deep-gemm", specifier = "==0.2.3" },
+    { name = "sgl-deep-gemm", specifier = "==0.2.9" },
     { name = "sgl-eval", marker = "extra == 'test'", specifier = "==0.1.3" },
+    { name = "sgl-fa3", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.1.0" },
+    { name = "sgl-flash-mla", specifier = "==1.0.5" },
     { name = "sglang", extras = ["diffusion"], marker = "extra == 'all'" },
     { name = "sglang", extras = ["fastokens"], marker = "extra == 'all'" },
     { name = "sglang", extras = ["fastokens"], marker = "extra == 'test'" },
     { name = "sglang", extras = ["http2"], marker = "extra == 'all'" },
     { name = "sglang", extras = ["test"], marker = "extra == 'dev'" },
     { name = "sglang", extras = ["tracing"], marker = "extra == 'all'" },
-    { name = "sglang-kernel", specifier = "==0.4.10" },
-    { name = "smg-grpc-servicer", specifier = ">=0.9.0" },
+    { name = "sglang-kernel", specifier = "==0.4.11" },
     { name = "soundfile", specifier = "==0.13.1" },
     { name = "st-attn", marker = "platform_machine != 'aarch64' and platform_machine != 'arm64' and extra == 'diffusion'", specifier = "==0.0.7" },
     { name = "tabulate", marker = "extra == 'test'" },
     { name = "termcolor", marker = "extra == 'diffusion-qvg'", specifier = ">=2.3" },
     { name = "tiktoken" },
     { name = "tilelang", specifier = "==0.1.12" },
-    { name = "timm", specifier = "==1.0.16" },
+    { name = "timm", specifier = "==1.0.25" },
+    { name = "tml-renderers", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')", specifier = "==0.4.1" },
     { name = "tokenizers", specifier = "==0.23.2" },
     { name = "torch", specifier = "==2.14.1" },
     { name = "torch-memory-saver", specifier = ">=0.0.9.post1" },
@@ -2168,7 +2226,7 @@ provides-extras = ["checkpoint-engine", "instanttensor", "runai", "diffusion", "
 
 [[package]]
 name = "sglang-kernel"
-version = "0.4.9+v100"
+version = "0.4.11+v100"
 source = { directory = "v100_plus/aot" }
 
 [[package]]
@@ -2218,34 +2276,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "smg-grpc-proto"
-version = "0.4.22"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "grpcio" },
-    { name = "protobuf" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/56/a31c8e0bdd6d65cbcc5e3d01ba339fa508c8d44c52f97d80f7f94887fe6a/smg_grpc_proto-0.4.22.tar.gz", hash = "sha256:0d69e782cabd4b76480461767351c2acddb887e2fed54bd1e7e4d1d4a52a5bd2", size = 30450, upload-time = "2026-09-24T10:57:39.674Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/8f/d3a787aac62a2056be3f767d20e4ed4d7d67366f967f82e5f94ffc2c90b7/smg_grpc_proto-0.4.22-py3-none-any.whl", hash = "sha256:215d52192952e70f03d94b0bdda5096f53c3c67602bd1c2568c5b1e6dd4fa12b", size = 99913, upload-time = "2026-09-24T10:57:38.534Z" },
-]
-
-[[package]]
-name = "smg-grpc-servicer"
-version = "0.13.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "grpcio" },
-    { name = "grpcio-health-checking" },
-    { name = "grpcio-reflection" },
-    { name = "smg-grpc-proto" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/20/bc/fd1f65f67bf7a6ae1540b5a56f67500661e67d84b2e116a4338b476e34e4/smg_grpc_servicer-0.13.0.tar.gz", hash = "sha256:c1778e41cc5016f82b12d75fcd1e9d6b56a3e70d89c10fb7ec12bf0c815bb79b", size = 198719, upload-time = "2026-09-24T10:58:25.108Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/02/bf56f2e3f6a4767ae79f390b3562a4474c41e979aa8ea95e360e21569d7d/smg_grpc_servicer-0.13.0-py3-none-any.whl", hash = "sha256:d4d9711ae2384d93b6e86f270fe1c9ef50da81a6c8db1eb02f5d7ce62fd66286", size = 159276, upload-time = "2026-09-24T10:58:23.603Z" },
 ]
 
 [[package]]
@@ -2356,7 +2386,7 @@ wheels = [
 
 [[package]]
 name = "timm"
-version = "1.0.16"
+version = "1.0.25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -2365,9 +2395,17 @@ dependencies = [
     { name = "torch" },
     { name = "torchvision" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/94/f6/4d7a8c261341fa6ad281920618739f2a650f41043afcedb570f24e99a776/timm-1.0.16.tar.gz", hash = "sha256:a3b8130dd2cb8dc3b9f5e3d09ab6d677a6315a8695fd5264eb6d52a4a46c1044", size = 2339999, upload-time = "2025-06-26T17:09:44.208Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/2c/593109822fe735e637382aca6640c1102c19797f7791f1fd1dab2d6c3cb1/timm-1.0.25.tar.gz", hash = "sha256:47f59fc2754725735cc81bb83bcbfce5bec4ebd5d4bb9e69da57daa92fcfa768", size = 2414743, upload-time = "2026-02-23T16:49:00.137Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/14/10d0ea58a7580b8bd7c8d69420b3dc3a1deb890d4ff297deca9717689598/timm-1.0.16-py3-none-any.whl", hash = "sha256:a640e58f4ae41e0445517d1133b34be75bb2bd49cdb830d739925ce1fb7d2526", size = 2485733, upload-time = "2025-06-26T17:09:42.652Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/50/de09f69a74278a16f08f1d562047a2d6713783765ee3c6971881a2b21a3f/timm-1.0.25-py3-none-any.whl", hash = "sha256:bef7f61dd717cb2dbbb7e326f143e13d660a47ecbd84116e6fe33732bed5c484", size = 2565837, upload-time = "2026-02-23T16:48:58.324Z" },
+]
+
+[[package]]
+name = "tml-renderers"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/3b/f6c50eb2c0b132e80877065310a95f724a587f90d3a6a9ca1018e7584590/tml_renderers-0.4.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:cc9d907a74c05c58590f32f7fdef523b9f6f96a41fb1a39c551af62aa36d67d8", size = 17254830, upload-time = "2026-11-06T21:48:28.723Z" },
 ]
 
 [[package]]

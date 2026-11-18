@@ -32,6 +32,7 @@ Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI
 target_include_directories(common_ops PRIVATE "${AOT}/include" "${AOT}/csrc" "${AOT}/../jit/include"
   "${repo-cutlass_SOURCE_DIR}/include" "${repo-flashinfer_SOURCE_DIR}/include" "${repo-flashinfer_SOURCE_DIR}/csrc")
 target_compile_definitions(common_ops PRIVATE FLASHINFER_ENABLE_F16)
+set_source_files_properties("${AOT}/csrc/speculative/speculative_sampling.cu" PROPERTIES COMPILE_DEFINITIONS SGLANG_V100_AOT_FLASHINFER_LEGACY_SCAN)
 target_compile_options(common_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3;--expt-relaxed-constexpr;--expt-extended-lambda;--threads=1>)
 target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} CUDA::cuda_driver CUDA::cudart)
 # Upstream's loader already supports a generic library at the package root.

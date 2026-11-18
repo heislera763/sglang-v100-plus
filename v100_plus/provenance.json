@@ -95,7 +95,7 @@
       "reference common_extension.cc speculative registrations"
     ]
   },
-  "current_kernel_version": "0.4.9+v100",
+  "current_kernel_version": "0.4.11+v100",
   "marlin_patches": {
     "v100_plus/patches/marlin-v100-block-fp8-prefill.patch": {
       "repository": "https://github.com/heislera763/marlin-v100",

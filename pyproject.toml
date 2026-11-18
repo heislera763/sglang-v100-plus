@@ -19,7 +19,7 @@ include = ["sglang_v100_plus*"]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # CUDA 13-only acceleration packages are unused by the SM70 serving paths.
 exclude-dependencies = ["flash-attn-4", "humming-kernels", "nvshmem4py-cu13", "sgl-deep-ep", "sgl-deep-gemm", "tokenspeed-mla", "nvidia-mathdx", "cuda-tile", "torchaudio", "torchcodec"]
-override-dependencies = ["sglang-kernel==0.4.9+v100", "cuda-python>=12.9.4,<13","torch @ https://download.pytorch.org/whl/cu126/torch-2.13.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=8695f3c6b7966d44560275b90c5c28e5091ba33ddbb1ab33b2173782ca1e9145", "flashinfer-python==0.6.18", "nvidia-cutlass-dsl==4.6.2", "torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.28.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=9afeeea3ec8fdf1d62b473bb13d5bd2dae3dc4d902afa0106f40b0ae5eb48e7b"]
+override-dependencies = ["sglang-kernel==0.4.11+v100", "cuda-python>=12.9.4,<13","torch @ https://download.pytorch.org/whl/cu126/torch-2.13.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=8695f3c6b7966d44560275b90c5c28e5091ba33ddbb1ab33b2173782ca1e9145", "flashinfer-python==0.6.18", "nvidia-cutlass-dsl==4.6.2", "torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.28.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=9afeeea3ec8fdf1d62b473bb13d5bd2dae3dc4d902afa0106f40b0ae5eb48e7b"]
 no-build-isolation-package = ["sglang", "sglang-kernel"]
 
 [tool.uv.sources]
