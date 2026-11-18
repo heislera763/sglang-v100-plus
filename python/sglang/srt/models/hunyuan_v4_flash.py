@@ -317,6 +317,9 @@ class FlashIndexPool(nn.Module):
             raise ValueError("The Hy4-Flash IndexPool kernels assume 4-token groups")
         self.group_budget = config.compressed_indexer_group_topk - 1
         self.index_topk = config.index_topk
+        self.dense_prefix_limit = min(
+            self.index_topk, (self.group_budget + 1) * self.ratio
+        )
         self.num_heads = config.compressed_indexer_num_attention_heads
         self.eps = config.rms_norm_eps
         theta = config.rope_for_layer_type("deepseek_sparse_attention")["rope_theta"]
@@ -547,7 +550,7 @@ class FlashIndexPool(nn.Module):
 
         ragged_offsets = _ragged_offsets(layout)
 
-        def select_rows(begin, end):
+        def score_rows(begin, end):
             logits = indexpool_kernels.indexpool_logits(
                 q_fp8[begin:end],
                 weights[begin:end],
@@ -558,7 +561,10 @@ class FlashIndexPool(nn.Module):
                 page_size,
                 num_groups,
             )
-            values, picked = _topk(logits, count)
+            return _topk(logits, count)
+
+        def select_rows(begin, end):
+            values, picked = score_rows(begin, end)
             return indexpool_kernels.indexpool_expand(
                 picked,
                 values,
@@ -581,23 +587,34 @@ class FlashIndexPool(nn.Module):
             and num_groups >= 512
         ):
             # Projections, pooled keys and logical cache slots are replicated.
-            # Score disjoint query rows and gather only their selected IDs.
+            # Gather one logical ID per pooled group. Expanding after the
+            # collective cuts the payload fourfold with the same key order.
             group = parallel.attn_tp_group
             shard_rows = triton.cdiv(rows, group.world_size)
             first = shard_rows * group.rank_in_group
             last = min(first + shard_rows, rows)
             local = torch.full(
-                (shard_rows, self.index_topk),
+                (shard_rows, count),
                 -1,
                 dtype=torch.int32,
                 device=positions.device,
             )
             for begin in range(first, last, chunk):
                 end = min(begin + chunk, last)
-                local[begin - first : end - first].copy_(select_rows(begin, end))
-            gathered = local.new_empty((shard_rows * group.world_size, self.index_topk))
+                values, picked = score_rows(begin, end)
+                picked = torch.where(values > -float("inf"), picked, -1)
+                local[begin - first : end - first].copy_(picked)
+            gathered = local.new_empty((shard_rows * group.world_size, count))
             group.all_gather_into_tensor(gathered, local)
-            return gathered[:rows]
+            return indexpool_kernels.indexpool_expand(
+                gathered[:rows],
+                None,
+                positions,
+                pages,
+                row_to_batch,
+                None,
+                self.index_topk,
+            )
 
         if chunk >= rows:
             return select_rows(0, rows)
@@ -625,8 +642,29 @@ class FlashIndexPool(nn.Module):
             return q_lora.new_full((num_rows, self.index_topk), -1, dtype=torch.int32)
         metadata = get_attn_backend().get_indexer_metadata(layer_id, forward_batch)
         layout = _row_layout(forward_batch, metadata, num_rows)
+        mode = forward_batch.forward_mode
+        # Before the group budget fills, every past token is selected. Still
+        # build the pooled keys so later chunks can score the entire history.
+        if (
+            mode == ForwardMode.EXTEND
+            and forward_batch.seq_lens_cpu is not None
+            and max(forward_batch.seq_lens_cpu.tolist()) <= self.dense_prefix_limit
+        ):
+            keys = self.token_key_norm(self.token_key_projection(x)[0])
+            self._update_cache(keys, forward_batch, layout)
+            indices = indexpool_kernels.window_indices(
+                layout.positions,
+                metadata.get_page_table_64(),
+                layout.row_to_batch.contiguous(),
+                _ragged_offsets(layout),
+                self.index_topk,
+                self.index_topk,
+            )
+            if self.dfly_topk_capture is not None:
+                self._capture_dfly_topk(indices, forward_batch)
+            return indices
         raw_key_proj, head_weights = self._project_key_and_head_weights(x)
-        if forward_batch.forward_mode.is_decode():
+        if mode.is_decode():
             self._decode_update_cache(raw_key_proj, forward_batch, layout)
         else:
             keys = self.token_key_norm(raw_key_proj)
@@ -639,7 +677,6 @@ class FlashIndexPool(nn.Module):
             self.num_heads,
             mrope_section=self.mrope_section,
         )
-        mode = forward_batch.forward_mode
         indices = self._select(
             layout,
             q_fp8,
@@ -1130,6 +1167,7 @@ class HYV4FlashAttention(HYV4Attention):
             self.indexer = FlashIndexPool(
                 config, layer_id, f"{prefix}.indexer", rope_store=rope_store
             )
+            self.attn_mqa.dsa_dense_prefix_limit = self.indexer.dense_prefix_limit
         self.post_proj_norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if config.sandwich_norm

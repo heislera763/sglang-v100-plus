@@ -2702,8 +2702,16 @@ class DeepseekSparseAttnBackend(
                         and forward_batch.forward_mode == ForwardMode.EXTEND
                         and forward_batch.batch_size == 1
                         and not is_cp_active(forward_batch)
-                        and getattr(layer, "dsa_ordered_window", -1)
-                        == page_table_1.shape[1]
+                        and (
+                            getattr(layer, "dsa_ordered_window", -1)
+                            == page_table_1.shape[1]
+                            or (
+                                forward_batch.seq_lens_cpu is not None
+                                and 0
+                                < int(forward_batch.seq_lens_cpu[0])
+                                <= getattr(layer, "dsa_dense_prefix_limit", 0)
+                            )
+                        )
                     ),
                 )
             if attn_sink is not None and self.device_capability == (7, 0):

@@ -13,6 +13,7 @@ from sglang.kernels.ops.attention.dsa.triton_sparse_mla import (
 _LOG2E = 1.4426950408889634
 _VALUE_DIM = 512
 _HEAD_TILE = 16
+_WINDOW_QUERIES = 16
 
 
 @tilelang.jit(
@@ -129,16 +130,17 @@ def _window_union_ids(
     WIDTH: tl.constexpr,
     BANK: tl.constexpr,
     BLOCK: tl.constexpr,
+    GROUP: tl.constexpr,
 ):
     group = tl.program_id(0)
     col = tl.arange(0, BLOCK)
-    row = group * 4
+    row = group * GROUP
     first_len = tl.minimum(tl.maximum(tl.load(lengths + row), 0), WIDTH)
     first = tl.load(indices + row * WIDTH + col, col < first_len, -1)
     extra = col - first_len + 1
     tail = tl.load(
         indices + (row + extra) * WIDTH + tl.minimum(first_len + extra, WIDTH) - 1,
-        (extra >= 1) & (extra < 4),
+        (extra >= 1) & (extra < GROUP),
         -1,
     )
     tl.store(
@@ -158,6 +160,7 @@ def _sink_softmax(
     WIDTH: tl.constexpr,
     BLOCK: tl.constexpr,
     WINDOW: tl.constexpr,
+    GROUP: tl.constexpr,
     scale,
 ):
     row = tl.program_id(0)
@@ -165,9 +168,9 @@ def _sink_softmax(
     col = tl.arange(0, BLOCK)
     slot = tl.load(indices + row * WIDTH + col, col < WIDTH, -1)
     if WINDOW:
-        last = tl.minimum(tl.load(lengths + row * 4), WINDOW) + head // HEADS
+        last = tl.minimum(tl.load(lengths + row * GROUP), WINDOW) + head // HEADS
         live = (col >= last - WINDOW) & (col < last)
-        base = (row * (4 * HEADS) + head) * WIDTH
+        base = (row * (GROUP * HEADS) + head) * WIDTH
     else:
         live = col < tl.load(lengths + row)
         base = (row * HEADS + head) * WIDTH
@@ -184,10 +187,10 @@ def _sink_softmax(
 
 def _prefill(q, kv, indices, lengths, sink, scale, output, ordered_window=False):
     # Gather bounded batches of selected keys for CUDA Tensor Core GEMMs.
-    # Four sequential queries in an ordered window can share one key bank.
+    # Sequential queries in an ordered window can share one key bank.
     rows, heads, dim = q.shape
     width = indices.shape[1]
-    group_size = 4 if ordered_window else 1
+    group_size = _WINDOW_QUERIES if ordered_window else 1
     bank_width = (
         triton.cdiv(width + group_size - 1, 16) * 16 if ordered_window else width
     )
@@ -210,6 +213,7 @@ def _prefill(q, kv, indices, lengths, sink, scale, output, ordered_window=False)
                 WIDTH=width,
                 BANK=bank_width,
                 BLOCK=triton.next_power_of_2(bank_width),
+                GROUP=group_size,
             )
             ids = union
         bank = kv.index_select(0, ids.reshape(-1).clamp(0, kv.shape[0] - 1))
@@ -228,6 +232,7 @@ def _prefill(q, kv, indices, lengths, sink, scale, output, ordered_window=False)
             WIDTH=bank_width,
             BLOCK=triton.next_power_of_2(bank_width),
             WINDOW=width if ordered_window else 0,
+            GROUP=group_size,
             scale=scale,
         )
         output[start:end].copy_(

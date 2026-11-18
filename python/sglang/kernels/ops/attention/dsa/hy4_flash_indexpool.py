@@ -740,6 +740,7 @@ def _expand_kernel(
     num_pages,
     K,
     RAGGED: tl.constexpr,
+    HAS_VALUES: tl.constexpr,
     RATIO: tl.constexpr,
     BLOCK_K: tl.constexpr,
     TOPK: tl.constexpr,
@@ -758,8 +759,10 @@ def _expand_kernel(
     ks = tl.arange(0, BLOCK_K)
     in_k = ks < K
     group = tl.load(picked_ptr + r * K + ks, mask=in_k, other=0).to(tl.int64)
-    val = tl.load(value_ptr + r * K + ks, mask=in_k, other=-float("inf"))
-    valid = in_k & (val > -float("inf")) & (group >= 0) & (group < upper)
+    valid = in_k & (group >= 0) & (group < upper)
+    if HAS_VALUES:
+        val = tl.load(value_ptr + r * K + ks, mask=in_k, other=-float("inf"))
+        valid &= val > -float("inf")
     dst = tl.cumsum(valid.to(tl.int32), axis=0) - 1
     n_hist = tl.sum(valid.to(tl.int32), axis=0)
     for o in tl.static_range(RATIO):
@@ -794,7 +797,9 @@ def indexpool_expand(
     picked, values, positions, pages, row_to_batch, ragged_offsets, topk
 ):
     """Packed sparse indices: the valid picked groups' tokens, then the query's
-    own group up to the query, then -1."""
+    own group up to the query, then -1. If values is None, rejected groups
+    must already have ID -1.
+    """
     rows = positions.shape[0]
     out = torch.empty((rows, topk), dtype=torch.int32, device=positions.device)
     if rows == 0:
@@ -803,7 +808,7 @@ def indexpool_expand(
     k = picked.shape[1]
     _expand_kernel[(rows,)](
         picked,
-        values,
+        values if values is not None else picked,
         positions,
         pages,
         row_to_batch,
@@ -813,6 +818,7 @@ def indexpool_expand(
         pages.shape[1],
         k,
         RAGGED=ragged,
+        HAS_VALUES=values is not None,
         RATIO=4,
         BLOCK_K=triton.next_power_of_2(max(k, 16)),
         TOPK=topk,
