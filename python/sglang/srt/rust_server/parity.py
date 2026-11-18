@@ -88,11 +88,11 @@ RUST_SERVER_IGNORED_BY_DESIGN: Dict[str, str] = {
     "grpc_worker_threads": "Python gRPC server thread pool.",
     # Routes the Rust server does not serve: their clients get a 404.
     "asr_max_concurrent_sessions": "/v1/realtime is not served.",
-    "enable_response_store": "/v1/responses is not served.",
-    "tool_server": "/v1/responses is not served.",
+    "enable_response_store": "The Rust frontend serves /v1/responses without a store; stateful requests get Python's store-disabled refusal.",
+    "tool_server": "The Rust /v1/responses skips built-in tools, which only a tool server would run.",
     "enable_mis": "/v1/decisions is not served.",
     "dllm_algorithm": "/v1/decisions is not served.",
-    "chunked_prefill_size": "/v1/score is not served.",
+    "chunked_prefill_size": "Only read by /v1/score's score_extraction_token path, which the Rust frontend refuses.",
     # Settings of features Rust-server mode refuses.
     "SGLANG_WAIT_WEIGHTS_READY_TIMEOUT": "Only with --checkpoint-engine-wait-weights-before-ready, which is refused.",
     "max_loaded_loras": "LoRA (--enable-lora, --lora-paths) is refused.",
@@ -145,7 +145,7 @@ RUST_SERVER_KNOWN_GAPS: Dict[str, str] = {
     "SGLANG_PYSPY_DUMP_BEFORE_CRASH": "No crash diagnostics when a scheduler crashes.",
     "SGLANG_CUDA_COREDUMP_BEFORE_CRASH": "No crash diagnostics when a scheduler crashes.",
     "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS": "No crash diagnostics when a scheduler crashes.",
-    "speculative_num_draft_tokens": "No per-request speculative-decoding stats in meta_info (also behind the speculative_algorithm read, honored by name).",
+    "speculative_num_draft_tokens": "Native /generate gets the scheduler's per-request speculative-decoding stats (SchedulerOutputStreamer.get_request_stats), but the OpenAI routes drop sglext.spec_tokens_details, and under adaptive speculative decoding the proposed-draft count follows the scheduler's active draft width where Python uses the launch value (also behind the speculative_algorithm read, honored by name).",
     "SGLANG_ENABLE_COLOCATED_BATCH_GEN": "Unverified: whether a batch's items are scheduled together.",
     "enable_encoder_swa_bounded_replay": "Unverified: Python refuses image requests off CUDA and warms up with text.",
     "SGLANG_INKLING_DEFAULT_REASONING_EFFORT": "Chat: the Rust chat route has no Inkling renderer.",
