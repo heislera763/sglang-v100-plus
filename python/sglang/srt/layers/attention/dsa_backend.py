@@ -3901,7 +3901,9 @@ class DeepseekSparseAttnBackend(
                 sm_scale,
                 topk_length,
                 attn_sink,
-                split=True,
+                # One decode row can use two small batched GEMMs directly.
+                # The split kernel amortizes its partials for multi-row work.
+                split=q_nope.shape[0] > 1,
             )
 
         from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
