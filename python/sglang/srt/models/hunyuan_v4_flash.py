@@ -1121,6 +1121,7 @@ class HYV4FlashAttention(HYV4Attention):
         if external_indexer is not None:
             self.indexer = external_indexer
         elif self.is_window_layer:
+            self.attn_mqa.dsa_ordered_window = config.sliding_window
             # The window holds at most `sliding_window` keys; a selection that
             # narrow lets the sparse kernel stop scanning there.
             width = min(config.index_topk, triton.cdiv(config.sliding_window, 64) * 64)

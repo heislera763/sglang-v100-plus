@@ -2684,6 +2684,28 @@ class DeepseekSparseAttnBackend(
                     v_head_dim=layer.v_head_dim,
                     topk_length=metadata.dsa_cache_seqlens_int32,
                 )
+            if attn_sink is not None and self._has_sm70_sink_geometry(
+                q_nope, kv_cache, layer.v_head_dim
+            ):
+                if q_all is None:
+                    q_all = torch.cat((q_nope, q_rope), dim=-1)
+                return self._forward_sm70_sink(
+                    q_all=q_all,
+                    kv_cache=kv_cache,
+                    page_table_1=page_table_1,
+                    sm_scale=layer.scaling,
+                    topk_length=metadata.dsa_cache_seqlens_int32,
+                    attn_sink=attn_sink,
+                    split=phase == "decode",
+                    ordered_window=(
+                        phase == "prefill"
+                        and forward_batch.forward_mode == ForwardMode.EXTEND
+                        and forward_batch.batch_size == 1
+                        and not is_cp_active(forward_batch)
+                        and getattr(layer, "dsa_ordered_window", -1)
+                        == page_table_1.shape[1]
+                    ),
+                )
             if attn_sink is not None and self.device_capability == (7, 0):
                 if phase == "decode":
                     return self._forward_triton_sink_decode(
@@ -3812,6 +3834,45 @@ class DeepseekSparseAttnBackend(
             <= self._TRITON_SINK_DECODE_MAX_WORK
         )
 
+    def _has_sm70_sink_geometry(self, q_nope, kv_cache, v_head_dim):
+        return (
+            self.device_capability == (7, 0)
+            and q_nope.dtype == kv_cache.dtype == torch.float16
+            and q_nope.shape[1] in (4, 8, 16)
+            and v_head_dim == 512
+            and kv_cache.shape[-1] in (512, 576)
+        )
+
+    def _forward_sm70_sink(
+        self,
+        q_all,
+        kv_cache,
+        page_table_1,
+        sm_scale,
+        topk_length,
+        attn_sink,
+        *,
+        split,
+        ordered_window=False,
+    ):
+        from sglang.kernels.ops.attention.dsa.sm70_sparse_mla import sparse_mla_sm70
+
+        rows, width = page_table_1.shape
+        lengths = topk_length
+        if lengths is None or lengths.shape != (rows,):
+            lengths = page_table_1.new_full((rows,), width)
+            ordered_window = False
+        return sparse_mla_sm70(
+            q_all,
+            kv_cache,
+            page_table_1,
+            lengths,
+            attn_sink,
+            sm_scale,
+            split=split,
+            ordered_window=ordered_window,
+        )
+
     def _forward_triton_sink_decode(
         self,
         q_nope: torch.Tensor,
@@ -3824,6 +3885,17 @@ class DeepseekSparseAttnBackend(
         attn_sink: torch.Tensor,
         kv_splits: Optional[int] = None,
     ) -> torch.Tensor:
+        if self._has_sm70_sink_geometry(q_nope, kv_cache, v_head_dim):
+            return self._forward_sm70_sink(
+                torch.cat((q_nope, q_rope), dim=-1),
+                kv_cache,
+                page_table_1,
+                sm_scale,
+                topk_length,
+                attn_sink,
+                split=True,
+            )
+
         from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
             triton_sparse_mla_decode_splitk,
         )

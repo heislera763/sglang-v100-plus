@@ -244,6 +244,15 @@ del _fn
 
 register_kernel(
     KernelSpec(
+        op="attention.sparse_mla_sm70",
+        backend=KernelBackend.JIT,
+        target="sglang.kernels.ops.attention.dsa.sm70_sparse_mla:sparse_mla_sm70",
+        capabilities={CapabilityRequirement.cuda(min_sm=(7, 0), max_sm=(7, 0))},
+    )
+)
+
+register_kernel(
+    KernelSpec(
         op="attention.mqa_logits_sm70",
         backend=KernelBackend.JIT,
         target="sglang.kernels.ops.attention.dsa.sm70_indexer_score:mqa_logits_sm70",
