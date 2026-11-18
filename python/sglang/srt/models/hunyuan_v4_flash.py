@@ -1235,10 +1235,10 @@ class HYV4FlashMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         latent = config.routed_expert_hidden_size or config.hidden_size
         self.latent = latent
-        # The checkpoint router is bf16: a bf16 x bf16 -> fp32 GEMM gives the
-        # reference's fp32 logits up to summation order, without upcasting x.
+        # Volta computes router logits in FP32. Store the expanded gate once
+        # instead of converting the full weight at every decoding step.
         gate_config = copy(config)
-        gate_config.router_fp32 = False
+        gate_config.router_fp32 = _is_volta()
         self.gate = MoEGate(
             config=gate_config, quant_config=None, prefix=f"{prefix}.gate"
         )
@@ -1682,8 +1682,13 @@ class HYV4FlashForConditionalGeneration(nn.Module, DeepseekV2WeightLoaderMixin):
 
         vision_weights = []
 
+        volta_router = _is_volta()
+
         def mapped_weights():
             for name, loaded_weight in weights:
+                if volta_router and name.endswith(".mlp.gate.weight"):
+                    # Preserve the FP16 operand rounding used by the SM70 router.
+                    loaded_weight = loaded_weight.to(torch.float16)
                 if name.startswith("vit."):
                     if self.visual is not None:
                         vision_weights.append(

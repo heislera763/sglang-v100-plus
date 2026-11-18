@@ -20,6 +20,30 @@ _SCORING_FUNC_MAP = {
 
 
 @triton.jit
+def _volta_sigmoid_topk(scores, bias, weights, ids, scale, APPLY_SCALE: tl.constexpr):
+    row = tl.program_id(0)
+    col = tl.arange(0, 512)
+    activated = tl.sigmoid(tl.load(scores + row * 512 + col))
+    biased = activated + tl.load(bias + col)
+    biased = tl.where(biased == biased, biased, -1e30)
+    # Sort descending floating-point values, choosing the lower expert ID for ties.
+    bits = tl.where(biased == 0.0, 0, biased.to(tl.uint32, bitcast=True))
+    sign_mask = tl.where((bits >> 31) != 0, 0xFFFFFFFF, 0x80000000).to(tl.uint32)
+    order = bits ^ sign_mask
+    keys = (order.to(tl.uint64) << 32) | (511 - col).to(tl.uint64)
+    winners = tl.topk(keys, 16)
+    expert = 511 - (winners & 0xFFFFFFFF).to(tl.int32)
+    selected = tl.gather(activated, expert, 0)
+    total = tl.sum(selected, 0)
+    selected = selected / tl.where(total > 0.0, total, 1.0)
+    if APPLY_SCALE:
+        selected *= scale
+    dst = row * 16 + tl.arange(0, 16)
+    tl.store(weights + dst, selected)
+    tl.store(ids + dst, expert)
+
+
+@triton.jit
 def _router_triton_kernel(
     scores_ptr,  # [M, N] raw logits, fp32/fp16/bf16 (upcast to fp32 on load)
     bias_ptr,  # [N]    fp32/fp16/bf16 (upcast to fp32 on load)
@@ -412,6 +436,34 @@ def moe_fused_gate(
     weights = torch.empty((M, K), dtype=torch.float32, device=scores.device)
     indices = torch.empty((M, K), dtype=torch.int32, device=scores.device)
     if M == 0:
+        return weights, indices
+
+    if (
+        cuda is not None
+        and cuda.is_sm(7, 0)
+        and (N, K, K_routed, num_expert_group) == (512, 16, 16, 1)
+        and scores.dtype == torch.float32
+        and scores.is_contiguous()
+        and scoring_func == "sigmoid"
+        and renormalize
+        and renormalize_epsilon == 0.0
+        and bias is not None
+        and bias.dtype == torch.float32
+        and bias.is_contiguous()
+        and bias.ndim == 1
+        and input_ids is None
+        and num_token_non_padded is None
+        and packed_out is None
+    ):
+        _volta_sigmoid_topk[(M,)](
+            scores,
+            bias,
+            weights,
+            indices,
+            float(routed_scaling_factor),
+            APPLY_SCALE=bool(apply_routed_scaling_factor_on_output),
+            num_warps=4,
+        )
         return weights, indices
 
     BLOCK_N = triton.next_power_of_2(N)  # 256 -> 256, 384 -> 512

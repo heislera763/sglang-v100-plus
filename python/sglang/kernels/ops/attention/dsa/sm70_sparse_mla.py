@@ -122,6 +122,117 @@ def _attention(heads, qk_dim, splits, tile):
     return attend
 
 
+# One query has too few heads for a full Volta MMA tile. Parallelize its
+# selected keys (QK) or output columns (PV) across CTAs. Loading physical KV
+# rows into shared memory avoids constructing a [queries, keys, 576] tensor.
+_SELECTED_PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+}
+
+
+@tilelang.jit(pass_configs=_SELECTED_PASS_CONFIGS)
+def _selected_qk(heads, dim, width):
+    rows, capacity = T.dynamic("rows"), T.dynamic("capacity")
+    tile_k, tile_n = 32, 64
+
+    @T.prim_func
+    def score(
+        Q: T.Tensor((rows, heads, dim), T.float16),
+        KV: T.Tensor((capacity, dim), T.float16),
+        IDs: T.Tensor((rows, width), T.int32),
+        Scores: T.Tensor((rows, heads, width), T.float32),
+    ):
+        with T.Kernel(width // tile_n, rows, threads=64) as (block, row):
+            query = T.alloc_shared((16, tile_k), T.float16)
+            key = T.alloc_shared((tile_n, tile_k), T.float16)
+            slots = T.alloc_shared((tile_n,), T.int32)
+            acc = T.alloc_fragment((16, tile_n), T.float32)
+            for j in T.Parallel(tile_n):
+                slots[j] = T.max(0, T.min(IDs[row, block * tile_n + j], capacity - 1))
+            T.clear(acc)
+            for step in T.serial(dim // tile_k):
+                for h, k in T.Parallel(16, tile_k):
+                    query[h, k] = T.if_then_else(
+                        h < heads, Q[row, h, step * tile_k + k], 0
+                    )
+                for j, k in T.Parallel(tile_n, tile_k):
+                    key[j, k] = KV[slots[j], step * tile_k + k]
+                T.gemm(
+                    query, key, acc, transpose_B=True, policy=T.GemmWarpPolicy.FullCol
+                )
+            for h, j in T.Parallel(heads, tile_n):
+                Scores[row, h, block * tile_n + j] = acc[h, j]
+
+    return score
+
+
+@tilelang.jit(pass_configs=_SELECTED_PASS_CONFIGS)
+def _selected_pv(heads, dim, width):
+    rows, capacity = T.dynamic("rows"), T.dynamic("capacity")
+    tile_k, tile_n = 32, 64
+    value_dim = _VALUE_DIM
+
+    @T.prim_func
+    def weighted_sum(
+        Probs: T.Tensor((rows, heads, width), T.float16),
+        KV: T.Tensor((capacity, dim), T.float16),
+        IDs: T.Tensor((rows, width), T.int32),
+        Out: T.Tensor((rows, heads, value_dim), T.float16),
+    ):
+        with T.Kernel(value_dim // tile_n, rows, threads=64) as (block, row):
+            prob = T.alloc_shared((16, tile_k), T.float16)
+            value = T.alloc_shared((tile_k, tile_n), T.float16)
+            slots = T.alloc_shared((tile_k,), T.int32)
+            acc = T.alloc_fragment((16, tile_n), T.float32)
+            T.clear(acc)
+            # Preserve IndexPool's selected-key order throughout accumulation.
+            for step in T.serial(width // tile_k):
+                for k in T.Parallel(tile_k):
+                    slots[k] = T.max(
+                        0, T.min(IDs[row, step * tile_k + k], capacity - 1)
+                    )
+                for h, k in T.Parallel(16, tile_k):
+                    prob[h, k] = T.if_then_else(
+                        h < heads, Probs[row, h, step * tile_k + k], 0
+                    )
+                for k, j in T.Parallel(tile_k, tile_n):
+                    value[k, j] = KV[slots[k], block * tile_n + j]
+                T.gemm(prob, value, acc, policy=T.GemmWarpPolicy.FullCol)
+            for h, j in T.Parallel(heads, tile_n):
+                Out[row, h, block * tile_n + j] = acc[h, j]
+
+    return weighted_sum
+
+
+def _indexed_prefill(q, kv, ids, lengths, sink, scale, out):
+    rows, heads, dim = q.shape
+    width = ids.shape[1]
+    # Bound FP32 scores to 64 MiB, including with larger prefill chunks.
+    chunk = max(1, (64 << 20) // (heads * width * 4))
+    for start in range(0, rows, chunk):
+        end = min(start + chunk, rows)
+        scores = q.new_empty((end - start, heads, width), dtype=torch.float32)
+        probs = q.new_empty(scores.shape)
+        _selected_qk(heads, dim, width)(q[start:end], kv, ids[start:end], scores)
+        _sink_softmax[(end - start, heads)](
+            scores,
+            ids[start:end],
+            lengths[start:end],
+            sink,
+            probs,
+            kv.shape[0],
+            HEADS=heads,
+            WIDTH=width,
+            BLOCK=width,
+            WINDOW=0,
+            GROUP=1,
+            scale=scale,
+        )
+        _selected_pv(heads, dim, width)(probs, kv, ids[start:end], out[start:end])
+    return out
+
+
 @triton.jit
 def _window_union_ids(
     indices,
@@ -290,6 +401,13 @@ def sparse_mla_sm70(
     indices = indices.contiguous()
     lengths = lengths.contiguous()
     sink = sink.contiguous()
+    if (
+        not split
+        and not ordered_window
+        and rows >= 128
+        and (heads, qk_dim, indices.shape[1]) == (4, 576, 2048)
+    ):
+        return _indexed_prefill(q, kv, indices, lengths, sink, scale, output)
     if not split:
         return _prefill(q, kv, indices, lengths, sink, scale, output, ordered_window)
     tile = 32

@@ -4353,6 +4353,10 @@ class DeepseekSparseAttnBackend(
         from sglang.kernels.ops.attention.dsa.sm70_sparse_mla import sparse_mla_sm70
 
         rows, width = page_table_1.shape
+        # One Hy4 request plus up to three drafts is cheaper as gathered
+        # GEMMs than as split-attention partials and a second reduction.
+        if rows <= 4 and (q_all.shape[1], width) in ((4, 2048), (8, 512)):
+            split = False
         lengths = topk_length
         if lengths is None or lengths.shape != (rows,):
             lengths = page_table_1.new_full((rows,), width)

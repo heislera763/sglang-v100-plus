@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from typing import Tuple
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -597,6 +598,28 @@ def test_moe_fused_gate_accepts_non_fp32_bias(
         rtol=0,
         atol=0,
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 0),
+    reason="Volta packed sigmoid top-k",
+)
+def test_volta_hy4_router_keeps_normalized_weight_bits():
+    rng = torch.Generator(device=DEVICE).manual_seed(531)
+    scores = torch.randn((65, 512), generator=rng, device=DEVICE)
+    bias = torch.zeros(512, device=DEVICE)
+    scores[0].zero_()
+    scores[1, :501] = float("nan")
+    for apply_scale in (False, True):
+        opts = dict(
+            routed_scaling_factor=3.998,
+            apply_routed_scaling_factor_on_output=apply_scale,
+        )
+        with patch("sglang.kernels.ops.moe.moe_fused_gate.current_arch") as arch:
+            arch.return_value.cuda = None
+            original = moe_fused_gate(scores, bias, 16, **opts)
+        candidate = moe_fused_gate(scores, bias, 16, **opts)
+        torch.testing.assert_close(candidate, original, rtol=0, atol=0, equal_nan=True)
 
 
 if __name__ == "__main__":

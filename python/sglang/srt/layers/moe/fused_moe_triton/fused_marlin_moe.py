@@ -117,8 +117,14 @@ def swiglu_limit_func(
     d = input.shape[1] // 2
     if (
         _is_cuda
-        and get_platform().is_sm90
         and input.is_cuda
+        and (
+            get_platform().is_sm90
+            or (
+                input.dtype == torch.float16
+                and torch.cuda.get_device_capability(input.device) == (7, 0)
+            )
+        )
         and input.dtype in (torch.bfloat16, torch.float16)
         and d % 16 == 0
         and input.is_contiguous()

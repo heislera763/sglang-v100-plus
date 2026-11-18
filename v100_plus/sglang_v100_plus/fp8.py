@@ -412,14 +412,14 @@ def apply_fp8_moe(original, method, layer, dispatch_output):
             and not get_exec().overlap.enable_two_batch_overlap
             and not get_exec().overlap.enable_single_batch_overlap
         )
-        single_row = (
-            hidden.shape == (1, 1536)
-            and topk.topk_ids.shape == (1, 16)
+        latent_experts = (
+            hidden.shape[1] == 1536
+            and topk.topk_ids.shape == (hidden.shape[0], 16)
             and layer.w13_weight.shape[1:] == (96, 6144)
             and layer.w2_weight.shape[1:] == (48, 6144)
             and getattr(layer, "_sm70_lora_a", None) is None
         )
-        if shared_buffers or single_row:
+        if shared_buffers or latent_experts:
             from .kernels.sm70_fp8_moe_decode import fp8_moe_decode
 
             return StandardCombineInput(
