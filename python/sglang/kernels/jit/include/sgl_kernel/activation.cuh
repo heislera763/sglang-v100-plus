@@ -57,7 +57,7 @@ SGL_DEVICE float rcp_approx_ftz(float x) {
 
 /// \brief tanh.approx.f32: one MUFU.TANH.
 SGL_DEVICE float tanh_approx(float x) {
-#ifndef USE_ROCM
+#if !defined(USE_ROCM) && SGL_CUDA_ARCH >= 750
   float y;
   asm("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
