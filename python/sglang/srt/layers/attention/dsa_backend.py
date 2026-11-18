@@ -2666,9 +2666,9 @@ class DeepseekSparseAttnBackend(
                 else:
                     kv_cache = _cat([k, k_rope], dim=-1)
 
-            if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
             if dsa_impl == "triton_sparse_mla":
+                if q_rope is not None:
+                    q_all = concat_mla_absorb_q_general(q_nope, q_rope)
                 return self._forward_triton_sparse_mla(
                     q_all=q_all,
                     kv_cache=kv_cache,
@@ -2685,6 +2685,7 @@ class DeepseekSparseAttnBackend(
                 v_head_dim=layer.v_head_dim,
                 topk_length=metadata.dsa_cache_seqlens_int32,
                 attn_sink=attn_sink,
+                q_parts=(q_nope, q_rope) if q_rope is not None else None,
             )
         elif dsa_impl == "flashinfer_sparse_mla":
             if q_rope is not None:
@@ -2868,8 +2869,17 @@ class DeepseekSparseAttnBackend(
             )
 
         if dsa_impl == "flashmla_sparse":
-            if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+            if self._use_triton_sink_decode(q_nope, kv_cache, page_table_1, attn_sink):
+                return self._forward_triton_sink_decode(
+                    q_nope=q_nope,
+                    q_rope=q_rope,
+                    kv_cache=kv_cache,
+                    page_table_1=page_table_1,
+                    sm_scale=layer.scaling,
+                    v_head_dim=layer.v_head_dim,
+                    topk_length=metadata.dsa_cache_seqlens_int32,
+                    attn_sink=attn_sink,
+                )
             return self._forward_flashmla_sparse(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2878,6 +2888,7 @@ class DeepseekSparseAttnBackend(
                 v_head_dim=layer.v_head_dim,
                 topk_length=metadata.dsa_cache_seqlens_int32,
                 attn_sink=attn_sink,
+                q_parts=(q_nope, q_rope) if q_rope is not None else None,
             )
         elif dsa_impl == "flashinfer_sparse_mla":
             if q_all is None:
@@ -3061,12 +3072,11 @@ class DeepseekSparseAttnBackend(
         sm_scale: float,
         topk_length: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
+        q_parts: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        # FlashMLA sparse kernel requires num_heads to be a multiple of 64 (Hopper) or 128 (Blackwell)
-        # When using TP, num_heads might be smaller (e.g., 256//8=32)
+        if q_parts is not None:
+            q_all = concat_mla_absorb_q_general(*q_parts)
         num_tokens, num_heads, head_dim = q_all.shape
-
-        # Determine required padding based on GPU architecture (use cached value)
         required_padding = 128 if self.device_sm_major >= 10 else 64
 
         need_padding = num_heads % required_padding != 0
@@ -3077,7 +3087,6 @@ class DeepseekSparseAttnBackend(
                 f"TP size may be too large for this model."
             )
 
-            # Pad q to required size
             q_padded = q_all.new_zeros((num_tokens, required_padding, head_dim))
             q_padded[:, :num_heads, :] = q_all
             q_input = q_padded
@@ -3107,6 +3116,14 @@ class DeepseekSparseAttnBackend(
             # helpers keep them aligned); fall back to full-width compute if
             # they ever diverge.
             topk_length = None
+        if (
+            topk_length is not None
+            and self.dsa_index_topk is not None
+            and page_table_1.shape[-1] < self.dsa_index_topk
+        ):
+            # A narrower selection (e.g. a sliding window) holds at most its
+            # width of valid indices; don't scan past it.
+            topk_length = topk_length.clamp(max=page_table_1.shape[-1])
 
         o, _, _ = self._call_flash_mla_sparse_fwd(
             q=q_input,
@@ -3743,6 +3760,57 @@ class DeepseekSparseAttnBackend(
             indices=page_table_1.unsqueeze(1),
             sm_scale=sm_scale,
             d_v=v_head_dim,
+        ).squeeze(0)
+
+    # Decode rows x selection width up to which the Triton split-K kernel beats
+    # FlashMLA's head-padded sparse kernel for sink models with few local heads
+    # (B300: 4 heads x 2048 at bs 32 is 20.4 vs 32.3 us; 8 x 512 at bs 64 is
+    # 13.7 vs 16.9 us; 4 x 2048 at bs 64 is 42.1 vs 40.5 us).
+    _TRITON_SINK_DECODE_MAX_WORK = 64 * 1024
+
+    def _use_triton_sink_decode(self, q_nope, kv_cache, page_table_1, attn_sink):
+        return (
+            attn_sink is not None
+            and _is_cuda
+            and q_nope.shape[1] <= 16
+            and q_nope.dtype == torch.bfloat16
+            and kv_cache.dtype == torch.bfloat16
+            and q_nope.shape[0] * page_table_1.shape[-1]
+            <= self._TRITON_SINK_DECODE_MAX_WORK
+        )
+
+    def _forward_triton_sink_decode(
+        self,
+        q_nope: torch.Tensor,
+        q_rope: torch.Tensor,
+        kv_cache: torch.Tensor,
+        page_table_1: torch.Tensor,
+        sm_scale: float,
+        v_head_dim: int,
+        topk_length: Optional[torch.Tensor],
+        attn_sink: torch.Tensor,
+    ) -> torch.Tensor:
+        from sglang.kernels.ops.attention.dsa.triton_sparse_mla_decode import (
+            triton_sparse_mla_decode_splitk,
+        )
+
+        rows, width = page_table_1.shape
+        if topk_length is not None and topk_length.shape[0] == rows:
+            lengths = topk_length.clamp(max=width).to(torch.int32)
+        else:
+            lengths = None
+        stream_id = int(torch.cuda.current_stream(q_nope.device).cuda_stream)
+        workspace = self._triton_sparse_mla_workspaces.setdefault(stream_id, [])
+        return triton_sparse_mla_decode_splitk(
+            q_nope=q_nope,
+            q_rope=q_rope,
+            kv=kv_cache,
+            indices=page_table_1.unsqueeze(1),
+            sm_scale=sm_scale,
+            d_v=v_head_dim,
+            workspace=workspace,
+            lengths=lengths,
+            attn_sink=attn_sink,
         ).squeeze(0)
 
     def _forward_triton_decode(
