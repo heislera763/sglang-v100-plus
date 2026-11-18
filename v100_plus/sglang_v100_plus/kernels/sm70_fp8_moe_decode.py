@@ -65,7 +65,14 @@ def _partial(
 
 @triton.jit
 def _activate(
-    P, Ids, A, I: tl.constexpr, SPLITS: tl.constexpr, BS: tl.constexpr, BN: tl.constexpr
+    P,
+    Ids,
+    A,
+    I: tl.constexpr,
+    SPLITS: tl.constexpr,
+    BS: tl.constexpr,
+    BN: tl.constexpr,
+    CLAMP: tl.constexpr,
 ):
     route = tl.program_id(1)
     n = tl.program_id(0) * BN + tl.arange(0, BN)
@@ -78,7 +85,13 @@ def _activate(
         up = (
             tl.sum(tl.load(P + base + I, mask, 0), axis=0).to(tl.float16).to(tl.float32)
         )
-        value = (gate / (1 + tl.exp(-gate)) * up).to(tl.float16)
+        if CLAMP is not None and CLAMP > 0:
+            gate = tl.minimum(gate, CLAMP)
+            up = tl.clamp(up, -CLAMP, CLAMP)
+        silu = gate / (1 + tl.exp(-gate))
+        if CLAMP is not None:
+            silu = silu.to(tl.float16).to(tl.float32)
+        value = (silu * up).to(tl.float16)
         tl.store(A + route * I + n, value)
 
 
@@ -97,6 +110,7 @@ def _combine(
     BS: tl.constexpr,
     BT: tl.constexpr,
     BN: tl.constexpr,
+    SCALE: tl.constexpr,
 ):
     n = tl.program_id(0) * BN + tl.arange(0, BN)
     row = tl.program_id(1)
@@ -115,29 +129,43 @@ def _combine(
     down = tl.sum(p, axis=1)
     if LORA:
         alpha = tl.load(LoraAlpha + flat_routes, valid, 0).to(tl.float32)
-        b = tl.load(
-            LoraB + experts[:, None] * H + n[None, :], valid[:, None], 0
-        ).to(tl.float32)
+        b = tl.load(LoraB + experts[:, None] * H + n[None, :], valid[:, None], 0).to(
+            tl.float32
+        )
         delta = alpha[:, None] * b
         down = (
-            (down.to(tl.float16).to(tl.float32) + delta)
-            .to(tl.float16)
-            .to(tl.float32)
+            (down.to(tl.float16).to(tl.float32) + delta).to(tl.float16).to(tl.float32)
         )
     weights = tl.load(Router + flat_routes, valid, 0)
     weighted = (down * weights[:, None]).to(tl.float16).to(tl.float32)
-    result = tl.sum(weighted, axis=0).to(tl.float16)
+    result = (tl.sum(weighted, axis=0) * SCALE).to(tl.float16)
     tl.store(Out + row * H + n, result)
 
 
-def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights, *, down_lora=None):
-    """Whole 640-wide experts; IDs are already local or masked with -1."""
+def fp8_moe_decode(
+    x,
+    w13,
+    w2,
+    s13,
+    s2,
+    ids,
+    weights,
+    *,
+    down_lora=None,
+    clamp=None,
+    routed_scale=1.0,
+    reuse_buffers=False,
+):
+    """Small FP8 expert batches with local IDs and -1 for nonlocal routes."""
     from sglang.srt.runtime_context import get_buffer
 
+    hidden = x.shape[-1]
+    inner = w2.shape[1] * 16
     if (
         x.ndim != 2
         or not 1 <= x.shape[0] <= 4
-        or x.shape[1] != 2560
+        or hidden % 256
+        or inner % 128
         or ids.ndim != 2
         or ids.shape[0] != x.shape[0]
         or not 1 <= ids.shape[1] <= 32
@@ -149,51 +177,80 @@ def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights, *, down_lora=None):
         or w2.dtype != torch.int32
         or s13.dtype != torch.float16
         or s2.dtype != torch.float16
-        or tuple(w13.shape[1:]) != (160, 5120)
-        or tuple(w2.shape[1:]) != (40, 10240)
+        or tuple(w13.shape[1:]) != (hidden // 16, 8 * inner)
+        or tuple(w2.shape[1:]) != (inner // 16, 4 * hidden)
         or w2.shape[0] != w13.shape[0]
-        or s13.shape != (w13.shape[0], 20, 1280)
-        or s2.shape != (w13.shape[0], 5, 2560)
+        or s13.shape != (w13.shape[0], hidden // 128, 2 * inner)
+        or s2.shape != (w13.shape[0], inner // 128, hidden)
     ):
-        raise ValueError("Unsupported SM70 whole-expert FP8 decode layout")
+        raise ValueError("Unsupported SM70 FP8 expert decode layout")
     if x.device.type != "cuda" or torch.cuda.get_device_capability(x.device) != (7, 0):
-        raise ValueError("Whole-expert FP8 vector decode requires SM70 CUDA")
+        raise ValueError("FP8 expert decode requires SM70 CUDA")
     tensors = (x, w13, w2, s13, s2, ids, weights)
     if any(t.device != x.device or not t.is_contiguous() for t in tensors):
         raise ValueError("FP8 decode requires contiguous colocated tensors")
     topk = ids.shape[1]
     rows = x.shape[0]
     num_routes = rows * topk
-    # One forward stream owns this scratch; graph replay consumes each layer
-    # before the next overwrites it. No per-layer persistent expansion of weights.
-    scratch = get_buffer(
-        f"v100_fp8_moe_decode:{x.device}:{rows}:{topk}",
-        lambda: (
-            torch.empty((num_routes, 20, 1280), dtype=torch.float32, device=x.device),
-            torch.empty((num_routes, 640), dtype=torch.float16, device=x.device),
-            torch.empty((num_routes, 5, 2560), dtype=torch.float32, device=x.device),
-        ),
+    gate_splits, down_splits = hidden // 128, inner // 128
+
+    def allocate():
+        return (
+            x.new_empty((num_routes, gate_splits, 2 * inner), dtype=torch.float32),
+            x.new_empty((num_routes, inner)),
+            x.new_empty((num_routes, down_splits, hidden), dtype=torch.float32),
+        )
+
+    # Share only when the caller has already established serialized execution.
+    gate, activation, down = (
+        get_buffer(
+            f"v100_fp8_moe_decode:{x.device}:{rows}:{topk}:{hidden}:{inner}", allocate
+        )
+        if reuse_buffers
+        else allocate()
     )
-    gate, activation, down = scratch
     out = torch.empty_like(x)
-    _partial[(20, 20, num_routes)](
-        x, w13, s13, ids, gate, 1280, 2560, False, topk, rows, 64, 128, 256, num_warps=4
+    _partial[(2 * inner // 64, gate_splits, num_routes)](
+        x,
+        w13,
+        s13,
+        ids,
+        gate,
+        2 * inner,
+        hidden,
+        False,
+        topk,
+        rows,
+        64,
+        128,
+        256,
+        num_warps=4,
     )
-    _activate[(5, num_routes)](gate, ids, activation, 640, 20, 32, 128, num_warps=4)
+    _activate[(inner // 128, num_routes)](
+        gate,
+        ids,
+        activation,
+        inner,
+        gate_splits,
+        triton.next_power_of_2(gate_splits),
+        128,
+        clamp,
+        num_warps=4,
+    )
     alpha = b = None
     if down_lora is not None:
         from sglang.kernels.ops.lora.sm70_rank_one import rank_one_coefficients
 
         a, b = down_lora
         alpha = rank_one_coefficients(activation, a, ids)
-    _partial[(40, 5, num_routes)](
+    _partial[(hidden // 64, down_splits, num_routes)](
         activation,
         w2,
         s2,
         ids,
         down,
-        2560,
-        640,
+        hidden,
+        inner,
         True,
         topk,
         rows,
@@ -202,7 +259,7 @@ def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights, *, down_lora=None):
         256,
         num_warps=4,
     )
-    _combine[(40, rows)](
+    _combine[(hidden // 64, rows)](
         down,
         ids,
         weights,
@@ -210,12 +267,13 @@ def fp8_moe_decode(x, w13, w2, s13, s2, ids, weights, *, down_lora=None):
         alpha,
         b,
         down_lora is not None,
-        2560,
+        hidden,
         topk,
-        5,
-        8,
+        down_splits,
+        triton.next_power_of_2(down_splits),
         triton.next_power_of_2(topk),
         64,
+        routed_scale,
         num_warps=4,
     )
     return out

@@ -390,41 +390,57 @@ def apply_fp8_moe(original, method, layer, dispatch_output):
     hidden = dispatch_output.hidden_states
     topk = dispatch_output.topk_output
     if (
-        # Scratch is shared by serialized forwards. TP/PP placement and the
-        # number of locally stored experts do not change this operation.
-        get_schedule().disable_overlap_schedule
-        and not get_exec().overlap.enable_two_batch_overlap
-        and not get_exec().overlap.enable_single_batch_overlap
-        and hidden.ndim == 2
+        hidden.ndim == 2
         and 1 <= hidden.shape[0] <= 4
-        and hidden.shape[1] == 2560
         and hidden.dtype == torch.float16
         and TopKOutputChecker.format_is_standard(topk)
-        and topk.topk_ids.shape == (hidden.shape[0], 10)
-        and layer.w13_weight.shape[1:] == (160, 5120)
-        and layer.w2_weight.shape[1:] == (40, 10240)
         and config.is_gated
         and config.activation == "silu"
         and not config.apply_router_weight_on_input
-        and config.routed_scaling_factor is None
+        and not config.no_combine
         and config.gemm1_alpha is None
         and config.gemm1_clamp_limit is None
-        and config.swiglu_limit is None
     ):
-        from .kernels.sm70_fp8_moe_decode import fp8_moe_decode
-
-        return StandardCombineInput(
-            hidden_states=fp8_moe_decode(
-                hidden,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale_inv,
-                layer.w2_weight_scale_inv,
-                topk.topk_ids,
-                topk.topk_weights,
-                down_lora=getattr(layer, "_sm70_lora_down", None),
-            )
+        shared_buffers = (
+            hidden.shape[1] == 2560
+            and topk.topk_ids.shape == (hidden.shape[0], 10)
+            and layer.w13_weight.shape[1:] == (160, 5120)
+            and layer.w2_weight.shape[1:] == (40, 10240)
+            and config.swiglu_limit is None
+            and config.routed_scaling_factor is None
+            and get_schedule().disable_overlap_schedule
+            and not get_exec().overlap.enable_two_batch_overlap
+            and not get_exec().overlap.enable_single_batch_overlap
         )
+        single_row = (
+            hidden.shape == (1, 1536)
+            and topk.topk_ids.shape == (1, 16)
+            and layer.w13_weight.shape[1:] == (96, 6144)
+            and layer.w2_weight.shape[1:] == (48, 6144)
+            and getattr(layer, "_sm70_lora_a", None) is None
+        )
+        if shared_buffers or single_row:
+            from .kernels.sm70_fp8_moe_decode import fp8_moe_decode
+
+            return StandardCombineInput(
+                hidden_states=fp8_moe_decode(
+                    hidden,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    layer.w13_weight_scale_inv,
+                    layer.w2_weight_scale_inv,
+                    topk.topk_ids,
+                    topk.topk_weights,
+                    down_lora=getattr(layer, "_sm70_lora_down", None),
+                    clamp=config.swiglu_limit,
+                    routed_scale=(
+                        1.0
+                        if config.routed_scaling_factor is None
+                        else config.routed_scaling_factor
+                    ),
+                    reuse_buffers=shared_buffers,
+                )
+            )
 
     mapping = layer.dispatcher.local_expert_mapping
     quant = MarlinMoeQuantInfo(
