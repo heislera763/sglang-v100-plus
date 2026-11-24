@@ -108,3 +108,56 @@ def test_hpc_attention_gate_is_bf16_only(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__]))
+
+
+def test_flash_pipeline_carries_all_ihc_streams(monkeypatch):
+    from sglang.srt.models import hunyuan_v4_flash as flash
+
+    # The pipeline break lies immediately before the third Engram in the
+    # checkpoint. Its layer consumes a fully applied, four-stream residual.
+    def post(output, residual, gates):
+        return residual + gates * output[:, None, :]
+
+    monkeypatch.setattr(flash, "fused_hy4_ihc_post", post)
+    counts = []
+
+    def block(index):
+        def forward(positions, hidden, batch, allocator, hashes, pending):
+            counts.append(index)
+            if pending is not None:
+                hidden = flash.HYV4FlashDecoderLayer._finish_post(hidden, pending)
+            if hidden.ndim == 2:
+                hidden = hidden[:, None, :].expand(-1, 4, -1)
+            gates = torch.arange(1, 5).view(1, 4, 1)
+            return hidden, (hidden[:, 0] + index + 1, gates, None)
+
+        return forward
+
+    inputs = torch.arange(15, dtype=torch.float32).reshape(3, 5)
+    tokens = torch.arange(3)
+    layers = [block(i) for i in range(4)]
+
+    def stage(start, end):
+        return SimpleNamespace(
+            pp_group=SimpleNamespace(is_first_rank=start == 0, is_last_rank=end == 4),
+            config=SimpleNamespace(hc_mult=4, hidden_size=5),
+            embed_tokens=lambda _: inputs,
+            layers=layers,
+            start_layer=start,
+            end_layer=end,
+            engram_hasher=None,
+            engram_index={},
+            rope_store=None,
+            hc_head=lambda x, _: x,
+            norm=None,
+        )
+
+    run = flash.HYV4FlashModel.forward
+    batch = SimpleNamespace()
+    reference = run(stage(0, 4), tokens, tokens, batch)
+    counts.clear()
+    proxy = run(stage(0, 2), tokens, tokens, batch)
+    assert proxy["hidden_states"].shape == (3, 20)
+    result = run(stage(2, 4), tokens, tokens, batch, pp_proxy_tensors=proxy)
+    assert counts == [0, 1, 2, 3]
+    assert torch.equal(result, reference)
