@@ -259,6 +259,21 @@ the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
 
 ## Performance and validation
 
+**Single-request raw inference, PP2×TP4.** Both quads run FP16 KV with a 262,144-token configured window and the checkpoint's sampler. Drafting is disabled. The 8K rows average three uncached requests with up to 256 sampled output tokens. The 131K rows are one cold document request. ERNIE’s earlier prefill includes first-use kernel compilation at new history widths.
+
+| Model and phase (tokens/s) | Before | After |
+| --- | ---: | ---: |
+| ERNIE, 8K prefill | 2,144 | 2,323 |
+| ERNIE, 8K decode | 18.4 | 21.9 |
+| ERNIE, 131K prefill | 929 | 1,726 |
+| ERNIE, 131K decode | 10.0 | 21.1 |
+| Hy4, 8K prefill | 3,198 | 4,945 |
+| Hy4, 8K decode | 36.2 | 37.4 |
+| Hy4, 131K prefill | 1,286 | 5,416 |
+| Hy4, 131K decode | 27.4 | 36.3 |
+
+ERNIE shares one FP32 softmax across its FP16 window and compressed-history banks. Hy4 reuses each unpacked pooled key across query rows and uses indexed GEMMs for the eight-head pipeline-stage geometry. Both use Volta FP16 Tensor Cores. Hy4 passes the same image check on both builds.
+
 **ERNIE 5.5 Flash Preview on eight V100s.** TP8, one request, 131,072 context, FP16 KV, Baidu's seven-token DSpark and native reasoning/tool parsers. The checkpoint supplies temperature 1.0 and top-p 0.95. Volta uses FP16 activations, the MXFP4 Marlin expert backend and the PyTorch sampler. Set the static memory fraction to 0.86 and cap the token pool at 131,328 for this 32 GiB-per-GPU layout.
 
 | Tokens/s | First working Volta port | Optimized Volta port |

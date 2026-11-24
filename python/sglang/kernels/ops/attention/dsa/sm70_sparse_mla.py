@@ -22,8 +22,10 @@ _WINDOW_QUERIES = 16
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     }
 )
-def _attention(heads, qk_dim, splits, tile):
+def _attention(heads, qk_dim, splits, tile, two_banks=False):
     rows, slots, width = (T.dynamic(x) for x in ("rows", "slots", "width"))
+    extra_slots = T.dynamic("extra_slots") if two_banks else slots
+    extra_width = T.dynamic("extra_width") if two_banks else width
     d = _VALUE_DIM
     htile = _HEAD_TILE
     scratch = (rows, splits, htile) if splits > 1 else (1, 1, 1)
@@ -35,6 +37,9 @@ def _attention(heads, qk_dim, splits, tile):
         KV: T.Tensor([slots, qk_dim], T.float16),
         IDs: T.Tensor([rows, width], T.int32),
         Length: T.Tensor([rows], T.int32),
+        ExtraKV: T.Tensor([extra_slots, qk_dim], T.float16),
+        ExtraIDs: T.Tensor([rows, extra_width], T.int32),
+        ExtraLength: T.Tensor([rows], T.int32),
         Sink: T.Tensor([heads], T.float32),
         Out: T.Tensor([rows, heads, d], T.float16),
         Partials: T.Tensor(partial_shape, T.float32),
@@ -56,7 +61,9 @@ def _attention(heads, qk_dim, splits, tile):
             rescale = T.alloc_fragment((htile,), T.float32)
 
             n = T.min(width, T.max(0, Length[row]))
-            num_tiles = T.ceildiv(n, tile)
+            first_tiles = T.ceildiv(n, tile)
+            extra_n = T.min(extra_width, T.max(0, ExtraLength[row])) if two_banks else 0
+            num_tiles = first_tiles + T.ceildiv(extra_n, tile)
             tiles_per_split = T.ceildiv(num_tiles, splits)
             begin = split * tiles_per_split
             end = T.min(begin + tiles_per_split, num_tiles)
@@ -66,12 +73,28 @@ def _attention(heads, qk_dim, splits, tile):
             for h, j in T.Parallel(htile, qk_dim):
                 q[h, j] = T.if_then_else(h < heads, Q[row, h, j], 0)
             for step in T.serial(begin, end):
-                for i in T.Parallel(tile):
-                    col = step * tile + i
-                    slot = T.if_then_else(col < n, IDs[row, col], -1)
-                    selected[i] = T.if_then_else((slot >= 0) & (slot < slots), slot, -1)
-                for i, j in T.Parallel(tile, qk_dim):
-                    k[i, j] = T.if_then_else(selected[i] >= 0, KV[selected[i], j], 0)
+                if two_banks and step >= first_tiles:
+                    for i in T.Parallel(tile):
+                        col = (step - first_tiles) * tile + i
+                        slot = T.if_then_else(col < extra_n, ExtraIDs[row, col], -1)
+                        selected[i] = T.if_then_else(
+                            (slot >= 0) & (slot < extra_slots), slot, -1
+                        )
+                    for i, j in T.Parallel(tile, qk_dim):
+                        k[i, j] = T.if_then_else(
+                            selected[i] >= 0, ExtraKV[selected[i], j], 0
+                        )
+                else:
+                    for i in T.Parallel(tile):
+                        col = step * tile + i
+                        slot = T.if_then_else(col < n, IDs[row, col], -1)
+                        selected[i] = T.if_then_else(
+                            (slot >= 0) & (slot < slots), slot, -1
+                        )
+                    for i, j in T.Parallel(tile, qk_dim):
+                        k[i, j] = T.if_then_else(
+                            selected[i] >= 0, KV[selected[i], j], 0
+                        )
                 for i, j in T.Parallel(tile, d):
                     v[i, j] = k[i, j]
                 T.clear(score)
@@ -405,26 +428,41 @@ def sparse_mla_sm70(
         not split
         and not ordered_window
         and rows >= 128
-        and (heads, qk_dim, indices.shape[1]) == (4, 576, 2048)
+        and qk_dim == 576
+        and (heads, indices.shape[1]) in ((4, 2048), (8, 2048), (16, 512))
     ):
         return _indexed_prefill(q, kv, indices, lengths, sink, scale, output)
     if not split:
         return _prefill(q, kv, indices, lengths, sink, scale, output, ordered_window)
+    return _online_selected(q, kv, indices, lengths, sink, scale, output)
+
+
+def _online_selected(q, kv, indices, lengths, sink, scale, output, extra=None):
+    """Accumulate both physical banks in one softmax and apply the head sink once."""
+    rows, heads, qk_dim = q.shape
+    extra_kv, extra_ids, extra_lengths = (
+        extra if extra is not None else (kv, indices, lengths)
+    )
     tile = 32
     sm_count = torch.cuda.get_device_properties(q.device).multi_processor_count
     splits = min(
-        triton.cdiv(indices.shape[1], tile), max(1, triton.cdiv(sm_count, rows))
+        triton.cdiv(indices.shape[1], tile)
+        + (triton.cdiv(extra_ids.shape[1], tile) if extra is not None else 0),
+        max(1, triton.cdiv(sm_count, rows)),
     )
     scratch_shape = (rows, splits, _HEAD_TILE) if splits > 1 else (1, 1, 1)
     scratch = q.new_empty(
         (*scratch_shape, _VALUE_DIM if splits > 1 else 1), dtype=torch.float32
     )
     lse = q.new_empty(scratch_shape, dtype=torch.float32)
-    _attention(heads, qk_dim, splits, tile)(
+    _attention(heads, qk_dim, splits, tile, extra is not None)(
         q,
         kv,
         indices,
         lengths,
+        extra_kv,
+        extra_ids,
+        extra_lengths,
         sink,
         output,
         scratch,

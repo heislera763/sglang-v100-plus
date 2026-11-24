@@ -102,7 +102,7 @@ def mqa_logits_sm70(query, keys, key_scales, weights, lengths, starts=None):
         query.is_cuda
         and torch.cuda.get_device_capability(query.device) == (7, 0)
         and query.ndim == 3
-        and query.shape[1] in (32, 64)
+        and query.shape[1] in (16, 32, 64)
         and query.shape[2] == 128
         and query.dtype in (torch.float16, torch.float8_e4m3fn)
         and keys.ndim in (2, 3)
@@ -127,7 +127,7 @@ def mqa_logits_sm70(query, keys, key_scales, weights, lengths, starts=None):
         and all(t.device == query.device for t in (keys, key_scales, weights, lengths))
     ):
         raise ValueError(
-            "SM70 index scoring requires [rows,32|64,128] FP16/FP8 queries, "
+            "SM70 index scoring requires [rows,16|32|64,128] FP16/FP8 queries, "
             "aligned shared/per-query FP16 keys, FP32 scales/weights and int32 lengths"
         )
     rows, capacity = query.shape[0], keys.shape[-2]

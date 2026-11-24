@@ -674,11 +674,35 @@ def indexpool_logits(
     """Logits of every row against the pooled groups before its own
     (``positions // 4`` of them); -inf past those up to ``num_groups`` columns."""
     rows, heads, _ = q_fp8.shape
+    software_fp8 = _software_fp8()
+    if (
+        rows
+        and num_groups
+        and pages.shape[0] == 1
+        and heads in (16, 32, 64)
+        and software_fp8
+    ):
+        from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+            shared_paged_scores_sm70,
+        )
+
+        # All queries address the same physical pages. Unpack the first key
+        # of each four-token group once and share it across the head GEMMs.
+        return shared_paged_scores_sm70(
+            q_fp8,
+            index_buf,
+            weights,
+            (positions // 4).int(),
+            pages[0],
+            num_groups,
+            cache_page=page_size,
+            table_page=64,
+            key_stride=4,
+        )
     out = torch.empty((rows, num_groups), dtype=torch.float32, device=q_fp8.device)
     if rows == 0 or num_groups == 0:
         return out
     block = 64
-    software_fp8 = _software_fp8()
     if not software_fp8 and rows >= _LOGITS_ROW_BLOCK_MIN_ROWS:
         block_r, block, warps = _LOGITS_ROWS_CONFIG
         _logits_rows_kernel[

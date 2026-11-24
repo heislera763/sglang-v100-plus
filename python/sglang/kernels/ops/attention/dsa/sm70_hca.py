@@ -116,6 +116,21 @@ def hca_fp16(
         assert compressed.dtype == q.dtype
         comp_ids = comp_ids.reshape(rows, -1).contiguous()
         width = comp_ids.shape[1]
+        if heads in (8, 16) and (rows >= 64 or width >= 256):
+            from sglang.kernels.ops.attention.dsa.sm70_sparse_mla import (
+                _online_selected,
+            )
+
+            return _online_selected(
+                q,
+                window.view(-1, dim),
+                window_ids,
+                window_lens.view(-1),
+                sink,
+                scale,
+                output,
+                extra=(compressed.view(-1, dim), comp_ids, comp_lens.view(-1)),
+            )
     else:
         compressed, comp_ids, comp_lens = window, window_ids, window_lens
     _hca[(rows, triton.cdiv(heads, 16))](

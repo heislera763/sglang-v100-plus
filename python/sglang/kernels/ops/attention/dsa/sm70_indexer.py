@@ -291,20 +291,24 @@ def _unpack_shared_index_pages(
     BR: tl.constexpr,
     PAGE: tl.constexpr,
     BT: tl.constexpr,
+    TABLE_PAGE: tl.constexpr,
+    KEY_STRIDE: tl.constexpr,
 ):
     row = tl.arange(0, BR)
     length = tl.minimum(width, tl.max(tl.load(Lens + row, row < ROWS, 0), 0))
     d = tl.arange(0, 128)
     for tile in range(tl.program_id(0), tl.cdiv(length, BT), tl.num_programs(0)):
         pos = tile * BT + tl.arange(0, BT)
-        page = tl.load(Table + pos // PAGE, pos < length, 0).to(tl.int64)
-        base = K + page * page_stride
+        token = pos * KEY_STRIDE
+        page = tl.load(Table + token // TABLE_PAGE, pos < length, 0).to(tl.int64)
+        slot = page * TABLE_PAGE + token % TABLE_PAGE
+        base = K + (slot // PAGE) * page_stride
         valid = (pos < length) & (page >= 0)
         key = tl.load(
-            base[:, None] + (pos % PAGE)[:, None] * 128 + d[None, :], valid[:, None], 0
+            base[:, None] + (slot % PAGE)[:, None] * 128 + d[None, :], valid[:, None], 0
         )
         scale = tl.load(
-            (base + PAGE * 128).to(tl.pointer_type(tl.float32)) + pos % PAGE, valid, 0
+            (base + PAGE * 128).to(tl.pointer_type(tl.float32)) + slot % PAGE, valid, 0
         )
         tl.store(
             Out + pos[:, None].to(tl.int64) * 128 + d[None, :],
@@ -314,14 +318,30 @@ def _unpack_shared_index_pages(
         tl.store(Scales + pos, scale, pos < length)
 
 
-def shared_paged_scores_sm70(q, cache, weights, lengths, table, width):
-    """A single request's verification rows share one FP16 scratch key bank."""
+def shared_paged_scores_sm70(
+    q,
+    cache,
+    weights,
+    lengths,
+    table,
+    width,
+    *,
+    cache_page=None,
+    table_page=None,
+    key_stride=1,
+):
+    """Score a single request using one unpacked bank for all query rows.
+
+    Each logical key lives at token (key index * key_stride) in the page table.
+    Cache and table page sizes may differ when pooling groups of original tokens.
+    """
     from sglang.kernels.ops.attention.dsa.sm70_indexer_score import mqa_logits_sm70
 
     rows, heads, dim = q.shape
     lengths = lengths.reshape(rows).contiguous()
     keys = torch.empty((width, dim), dtype=torch.float16, device=q.device)
     scales = torch.empty(width, dtype=torch.float32, device=q.device)
+    page = cache.shape[1] if cache_page is None else cache_page
     if rows and width:
         _unpack_shared_index_pages[(min(256, triton.cdiv(width, 16)),)](
             cache.view(torch.uint8),
@@ -333,8 +353,10 @@ def shared_paged_scores_sm70(q, cache, weights, lengths, table, width):
             cache.stride(0),
             rows,
             triton.next_power_of_2(rows),
-            cache.shape[1],
+            page,
             16,
+            page if table_page is None else table_page,
+            key_stride,
         )
     return mqa_logits_sm70(q, keys, scales, weights.reshape(rows, heads), lengths)
 

@@ -738,6 +738,40 @@ def test_verify_rows_use_their_requests_page_table():
         assert torch.isneginf(shared[~valid]).all()
 
 
+@pytest.mark.parametrize("page", [16, 64])
+def test_pooled_key_stride_uses_physical_pages(page):
+    from sglang.kernels.ops.attention.dsa.hy4_flash_indexpool import indexpool_logits
+
+    if torch.cuda.get_device_capability() != (7, 0):
+        pytest.skip("Volta pooled-key scoring")
+    rng = torch.Generator(device="cuda").manual_seed(531)
+    keys = torch.randn(128, 128, device="cuda", generator=rng).to(torch.float8_e4m3fn)
+    scales = torch.rand(128, device="cuda", generator=rng)
+    cache = torch.cat(
+        (
+            keys.view(torch.uint8).view(-1, page * 128),
+            scales.view(-1, page).view(torch.uint8),
+        ),
+        dim=-1,
+    )
+    table = torch.tensor([[1, 0]], dtype=torch.int32, device="cuda")
+    pos = torch.tensor([-1, 0, 64, 127], device="cuda")
+    q = torch.randn(len(pos), 16, 128, device="cuda", generator=rng).to(
+        torch.float8_e4m3fn
+    )
+    weights = torch.randn(len(pos), 16, device="cuda", generator=rng)
+    out = indexpool_logits(
+        q, weights, table, torch.zeros_like(pos), pos, cache, page, 128
+    )
+    logical = 4 * torch.arange(32, device="cuda")
+    slots = table[0, logical // 64] * 64 + logical % 64
+    dots = q.float() @ keys.float()[slots].T
+    ref = (dots.relu() * weights.unsqueeze(2)).sum(1) * scales[slots]
+    mask = torch.arange(128, device="cuda") < (pos // 4)[:, None]
+    assert torch.equal(out.isfinite(), mask)
+    torch.testing.assert_close(out[mask], ref[mask[:, :32]], rtol=2e-5, atol=5e-5)
+
+
 def test_shared_prefill_scoring_changed_graph_and_output_canaries():
     """Replay must refresh shared keys/weights/causality without writing guards."""
     from sglang.kernels.ops.attention.dsa.sm70_indexer_score import _index_score_kernel
