@@ -518,9 +518,9 @@ class TestV100SmallBatches(CustomTestCase):
                     )
                 )
 
-    def test_glm_primary_projection_routes_preserve_fp32(self):
+    def test_volta_blas_projections_preserve_operand_dtype(self):
         def forbidden_fallback(*args):
-            self.fail("Declared GLM projections must not delegate dispatch")
+            self.fail("Declared Volta projections must not delegate dispatch")
 
         with (
             envs.SGLANG_DEBUG_V100_STRICT_DISPATCH.override(True),
@@ -529,6 +529,8 @@ class TestV100SmallBatches(CustomTestCase):
             for rows in (1, 6, 8):
                 for n, dtype in (
                     (3336, torch.float16),
+                    (192, torch.float16),  # ERNIE fused index projection
+                    (3337, torch.float16),  # cuBLAS handles arbitrary FP16 widths
                     (32, torch.float32),
                     (768, torch.float16),
                     (3072, torch.float16),
@@ -542,8 +544,8 @@ class TestV100SmallBatches(CustomTestCase):
                     torch.testing.assert_close(
                         actual, torch.nn.functional.linear(x, weight), rtol=0, atol=0
                     )
-            x = torch.zeros(6, 4096, device="cuda", dtype=torch.float16)
-            weight = torch.zeros(3337, 4096, device="cuda", dtype=torch.float16)
+            x = torch.zeros(6, 4096, device="cuda", dtype=torch.float32)
+            weight = torch.zeros(3337, 4096, device="cuda", dtype=torch.float32)
             with self.assertRaisesRegex(V100FallbackError, "gemm.unquantized_linear"):
                 apply_unquant(
                     forbidden_fallback, None, SimpleNamespace(weight=weight), x
