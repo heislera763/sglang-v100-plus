@@ -203,6 +203,9 @@ class _RowLayout:
         self.row_to_batch = row_to_batch
         self.metadata = metadata
         self.num_rows = num_rows
+        self.single_request_verify = (
+            mode.is_target_verify() and forward_batch.batch_size == 1
+        )
 
     @property
     def max_tokens(self) -> int:
@@ -563,6 +566,7 @@ class FlashIndexPool(nn.Module):
                 buf,
                 page_size,
                 num_groups,
+                shared_verify_pages=layout.single_request_verify,
             )
             return _topk(logits, count)
 

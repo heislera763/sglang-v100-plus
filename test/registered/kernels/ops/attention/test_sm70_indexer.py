@@ -763,6 +763,17 @@ def test_pooled_key_stride_uses_physical_pages(page):
     out = indexpool_logits(
         q, weights, table, torch.zeros_like(pos), pos, cache, page, 128
     )
+    # Target verification has one table row per candidate. A later candidate
+    # can see a physical page that is still outside an earlier row's prefix.
+    repeated = table.expand(len(pos), -1).contiguous()
+    repeated[pos < 64, 1] = 1
+    members = torch.arange(len(pos), device="cuda")
+    per_row = indexpool_logits(q, weights, repeated, members, pos, cache, page, 128)
+    shared = indexpool_logits(
+        q, weights, repeated, members, pos, cache, page, 128, shared_verify_pages=True
+    )
+    torch.testing.assert_close(shared, out, rtol=0, atol=0)
+    torch.testing.assert_close(shared, per_row, rtol=2e-5, atol=5e-5)
     logical = 4 * torch.arange(32, device="cuda")
     slots = table[0, logical // 64] * 64 + logical % 64
     dots = q.float() @ keys.float()[slots].T

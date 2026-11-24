@@ -7,7 +7,7 @@
     "python/sglang/kernels/jit/include/sgl_kernel/activation.cuh": "Build the supported SM70 activation implementation with the pinned CUDA toolkit.",
     "python/sglang/kernels/jit/include/sgl_kernel/speculative/sampling.cuh": "Use the scan interface of the pinned FlashInfer headers for the Volta AOT build.",
     "python/sglang/kernels/ops/attention/__init__.py": "Register lazy SM70 canonical attention, windowed GQA, sparse indexer and fused K-pool decode operators.",
-    "python/sglang/kernels/ops/attention/dsa/hy4_flash_indexpool.py": "Score one Hy4 request with a shared Tensor Core bank, preserving four-token group layout and causal bounds.",
+    "python/sglang/kernels/ops/attention/dsa/hy4_flash_indexpool.py": "Share one Hy4 request’s pooled keys across prefill and target verification on Volta Tensor Cores, preserving each row’s causal bound.",
     "python/sglang/kernels/ops/attention/dsa/sm70_hca.py": "Use the two-bank Tensor Core contraction for large ERNIE prefills and deep history, retaining the small-history scalar kernel.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer.py": "Unpack paged or pooled physical keys once for shared Volta query scoring.",
     "python/sglang/kernels/ops/attention/dsa/sm70_indexer_score.py": "Volta Tensor Core index scores for 16, 32 or 64 heads with packed-request bounds and shared prefill keys.",

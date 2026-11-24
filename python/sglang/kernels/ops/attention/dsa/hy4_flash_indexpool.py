@@ -669,7 +669,16 @@ _LOGITS_ROWS_CONFIG = (8, 128, 4)  # (BLOCK_R, BLOCK_G, num_warps)
 
 
 def indexpool_logits(
-    q_fp8, weights, pages, row_to_batch, positions, index_buf, page_size, num_groups
+    q_fp8,
+    weights,
+    pages,
+    row_to_batch,
+    positions,
+    index_buf,
+    page_size,
+    num_groups,
+    *,
+    shared_verify_pages=False,
 ):
     """Logits of every row against the pooled groups before its own
     (``positions // 4`` of them); -inf past those up to ``num_groups`` columns."""
@@ -678,7 +687,7 @@ def indexpool_logits(
     if (
         rows
         and num_groups
-        and pages.shape[0] == 1
+        and (pages.shape[0] == 1 or shared_verify_pages)
         and heads in (16, 32, 64)
         and software_fp8
     ):
@@ -693,7 +702,9 @@ def indexpool_logits(
             index_buf,
             weights,
             (positions // 4).int(),
-            pages[0],
+            # DSA repeats a single request's page table per verify row.
+            # The last row covers the full block, including a crossed page.
+            pages[-1],
             num_groups,
             cache_page=page_size,
             table_page=64,
