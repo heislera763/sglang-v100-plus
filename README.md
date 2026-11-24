@@ -298,6 +298,19 @@ On Hy4 TP8, switching only the pooled-key scorer changed perplexity from 62.89 t
 
 Means of two uncached 3,772-token document requests per build. DSpark averaged 3.56 and 3.55 tokens per verification cycle respectively. The optimized indexer decodes each E4M3 bank once and uses FP16 Tensor Cores with FP32 scores. Large prefills exchange FP16 head slices across ranks to compute cross-head mixing locally in FP32. A separate 8,131-token request measured 1,287 prefill and 42.3 decode tokens/s. Both documents returned the requested record, and the native tool parser returned a structured call.
 
+**Hy4 Heretic FP8 with DFly2 and one active request.** Each PP2 stage owns one NVLink quad. The tail hosts the drafter and reuses the target’s selected keys and FP16 KV. Single-request verification unpacks each compressed index key once for the whole draft block. These runs used vision, a 262,144-token window, 2,048-token prefill chunks, temperature 0.9 and top-p 1. Short results average coding, document analysis and a tool response, each with 8,192 uncached input tokens and 256 generated tokens.
+
+| Throughput (tokens/s) | PP2×TP4 raw | PP2×TP4, 5 drafts | PP2×TP4, 6 drafts | TP8, 5 drafts | TP8, 6 drafts |
+|---|---:|---:|---:|---:|---:|
+| 8K prefill | 5,001 | 4,926 | 4,949 | 2,971 | 2,943 |
+| 8K decode | 37.4 | 42.3 | 44.0 | 54.6 | 44.8 |
+| 131K cold prefill | 5,416 | 5,411 | 5,390 | 2,795 | 2,791 |
+| 131K cold decode | 36.3 | 55.1 | 46.7 | 66.1 | 58.7 |
+| 8K append to 131K prefill | 3,103 | 3,855 | 3,788 | 2,456 | 2,453 |
+| 8K append to 131K decode | 35.6 | 43.2 | 46.2 | 51.5 | 44.3 |
+
+For the measured pipeline configuration, use `SGLANG_PP_LAYER_PARTITION=21,21 SGLANG_ENABLE_PP_SPEC=1` with `--pp-size 2 --tp-size 4 --ep-size 2 --max-running-requests 1 --speculative-algorithm DFLY --speculative-dfly-block-size 6`. Block size 6 proposes five tokens, as in Tencent’s example. Block size 7 proposes six. On PP2 the sixth proposal survived in 15% of the short-prompt rounds. Six led on the short-suite mean and cached append, while five led on the 131K cold request. On TP8/EP4, five led on all three workloads. The deep raw column reuses the target-only measurements from the preceding pass. [Tencent deployment recipe](https://huggingface.co/tencent/Hy4-flash#inference-frameworks)
+
 **Hy4 Flash FP8 on eight V100s.** TP8/EP4, FP16 KV, 262,144 context, vision, batch one. Prefill is effective uncached input throughput on 8.4K code and 9.6K document prompts. Generation averages those prompts and a short thinking chat at 160 output tokens. Code is greedy. Document and chat use temperature 0.9 and top-p 1.
 
 | Tokens/s | Before | Ordered SM70 attention and routing |
