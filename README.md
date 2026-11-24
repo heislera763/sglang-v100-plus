@@ -311,6 +311,16 @@ Means of two uncached 3,772-token document requests per build. DSpark averaged 3
 
 For the measured pipeline configuration, use `SGLANG_PP_LAYER_PARTITION=21,21 SGLANG_ENABLE_PP_SPEC=1` with `--pp-size 2 --tp-size 4 --ep-size 2 --max-running-requests 1 --speculative-algorithm DFLY --speculative-dfly-block-size 6`. Block size 6 proposes five tokens, as in Tencent’s example. Block size 7 proposes six. On PP2 the sixth proposal survived in 15% of the short-prompt rounds. Six led on the short-suite mean and cached append, while five led on the 131K cold request. On TP8/EP4, five led on all three workloads. The deep raw column reuses the target-only measurements from the preceding pass. [Tencent deployment recipe](https://huggingface.co/tencent/Hy4-flash#inference-frameworks)
 
+For PP2/EP2 with six drafts (`--speculative-dfly-block-size 7`), use `--chunked-prefill-size 2048` for interactive chat and `4096` for bulk document ingestion. The updated Volta Marlin kernel shares one FP8 scale across its 128-column block. At matched chunk sizes it reproduced all sampled token IDs in the comparison. Successive prompt chunks overlap across quads, so the uncached input length determines how well the pipeline stays occupied.
+
+| Throughput (tokens/s) | 2,048-token chunks | 4,096-token chunks |
+|---|---:|---:|
+| 8K mean prefill / decode | 5,038 / 44.3 | 4,669 / 41.5 |
+| 131K cold prefill / decode | 5,581 / 46.6 | 6,186 / 40.4 |
+| 8K append to 131K prefill / decode | 3,961 / 45.7 | 3,798 / 42.1 |
+
+The larger chunks also processed a 122,688-token append ending at 261,888 tokens at 5,416 prefill and 43.6 decode tokens/s. At 131K the two chunk sizes committed different sampled continuations, averaging 2.38 and 1.98 accepted drafts per round respectively.
+
 **Hy4 Flash FP8 on eight V100s.** TP8/EP4, FP16 KV, 262,144 context, vision, batch one. Prefill is effective uncached input throughput on 8.4K code and 9.6K document prompts. Generation averages those prompts and a short thinking chat at 160 output tokens. Code is greedy. Document and chat use temperature 0.9 and top-p 1.
 
 | Tokens/s | Before | Ordered SM70 attention and routing |
