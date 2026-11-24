@@ -272,20 +272,22 @@ ERNIE and GLM use EP1. Hy4 uses EP4 on TP8 and EP2 on TP4. Qwen uses EP8 and EP4
 
 ## Performance and validation
 
-**Single-request raw inference, PP2×TP4.** Both quads run FP16 KV with a 262,144-token configured window and the checkpoint's sampler. Drafting is disabled. The 8K rows average three uncached requests with up to 256 sampled output tokens. The 131K rows are one cold document request. ERNIE’s earlier prefill includes first-use kernel compilation at new history widths.
+**Single-request raw inference.** Both quads run FP16 KV with a 262,144-token configured window and checkpoint sampling. Drafting is disabled. The 8K rows average three cold requests with up to 256 sampled output tokens. The 131K rows are one cold document request. ERNIE’s earlier deep prefill includes first-use kernel compilation at new history widths.
 
-| Model and phase (tokens/s) | Before | After |
-| --- | ---: | ---: |
-| ERNIE, 8K prefill | 2,144 | 2,323 |
-| ERNIE, 8K decode | 18.4 | 21.9 |
-| ERNIE, 131K prefill | 929 | 1,726 |
-| ERNIE, 131K decode | 10.0 | 21.1 |
-| Hy4, 8K prefill | 3,198 | 4,945 |
-| Hy4, 8K decode | 36.2 | 37.4 |
-| Hy4, 131K prefill | 1,286 | 5,416 |
-| Hy4, 131K decode | 27.4 | 36.3 |
+| Model and phase (tokens/s) | TP8 before | TP8 after | PP2×TP4 before | PP2×TP4 after |
+| --- | ---: | ---: | ---: | ---: |
+| ERNIE, 8K prefill | 1,341 | 1,449 | 2,144 | 2,323 |
+| ERNIE, 8K decode | 17.6 | 20.6 | 18.4 | 21.9 |
+| ERNIE, 131K prefill | 575 | 952 | 929 | 1,726 |
+| ERNIE, 131K decode | 9.8 | 20.0 | 10.0 | 21.1 |
+| Hy4, 8K prefill | 2,673 | 2,944 | 3,198 | 4,945 |
+| Hy4, 8K decode | 40.1 | 41.5 | 36.2 | 37.4 |
+| Hy4, 131K prefill | 1,121 | 2,785 | 1,286 | 5,416 |
+| Hy4, 131K decode | 29.4 | 40.5 | 27.4 | 36.3 |
 
 ERNIE shares one FP32 softmax across its FP16 window and compressed-history banks. Hy4 reuses each unpacked pooled key across query rows and uses indexed GEMMs for the eight-head pipeline-stage geometry. Both use Volta FP16 Tensor Cores. Hy4 passes the same image check on both builds.
+
+On Hy4 TP8, switching only the pooled-key scorer changed perplexity from 62.89 to 63.53 across three 256-token continuations of 8K prefixes. Top predictions agreed at 686 of 768 positions. Each scorer reproduced its own results exactly when run again in reverse order. In 384 sampled live routing rows, both scorers returned all 511 group IDs in the same order. ERNIE TP8 agreed on all 14 top predictions in its smaller 8K control.
 
 **ERNIE 5.5 Flash Preview on eight V100s.** TP8, one request, 131,072 context, FP16 KV, Baidu's seven-token DSpark and native reasoning/tool parsers. The checkpoint supplies temperature 1.0 and top-p 0.95. Volta uses FP16 activations, the MXFP4 Marlin expert backend and the PyTorch sampler. Set the static memory fraction to 0.86 and cap the token pool at 131,328 for this 32 GiB-per-GPU layout.
 
