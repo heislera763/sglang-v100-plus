@@ -1,25 +1,9 @@
 # sglang-v100-plus
 
-[SGLang](https://github.com/sgl-project/sglang) adapted for **eight V100 SXM2 32 GB GPUs
-in two NVLink quads**. We rebuilt useful SM70 support from
-[haohervchb/sglang-V100](https://github.com/haohervchb/sglang-V100) on mainline,
-effectively rebasing it into an independent fork. Qwen3.8-Flash-Next FP8 and
-GLM-5.3-Flash NVFP4 work is consolidated on `main`.
+This SGLang fork targets eight 32 GB V100 SXM2 GPUs arranged as two four-GPU NVLink islands. It rebuilds the useful SM70 work from the original V100 fork on mainline SGLang and supports Qwen3.8 Flash Next FP8, GLM-5.3 Flash FP4-Local, Hy4 Flash FP8 and ERNIE 5.5 Flash Preview. [Original V100 fork](https://github.com/haohervchb/sglang-V100) · [SGLang upstream](https://github.com/sgl-project/sglang)
 
-`main` contains validated changes; `dev` is the integration branch. Both include
-the qualified unified GLM attention work. The [FA fork](https://github.com/heislera763/flash-attention-v100)
-owns native CUDA sparse, vision and KDA attention; SGLang owns thin adapters,
-metadata and cache/state lifetimes. Advance `main` after correctness and model
-throughput checks. Qwen retains its existing backend during this work.
-Clone remotes: `origin` is this fork; `upstream` is `sgl-project/sglang`.
+The shared baseline for `main` and `dev` incorporates upstream through November 24 and builds sglang-kernel 0.4.11 for SM70. `codex/volta-raw-inference` isolates raw prefill and decode experiments. TP8 spans both islands. PP2×TP4 keeps each stage’s tensor-parallel reductions on its own quad and sends activations across the pipeline boundary. The GLM backend uses native CUDA sparse, vision and KDA kernels from the companion FlashAttention fork. [Upstream base](https://github.com/sgl-project/sglang/commit/f4284f29ba56fffe2d09c9e6c5ac5e218e6cc053) · [FlashAttention V100](https://github.com/heislera763/flash-attention-v100)
 
-The Hy4 performance branch additionally integrates [upstream aa83b037](https://github.com/sgl-project/sglang/commit/aa83b0376b23c647b1272fbb0f47f64e2a74b8bd) and builds sglang-kernel 0.4.11 for SM70.
-
-Previous integration: [c3c292b6](https://github.com/sgl-project/sglang/commit/c3c292b65ab42efd933e0c77cfb48eb69f1b81d0), integrated 2026-11-07.
-The prior update included GLM tool-name normalization and KDA fixes; the latest
-also adds a fused GLM KDA decode path for newer GPUs. The SM70 profile continues
-to use its own KDA kernels. Draft KV planning and Triton execution share the
-same replicated-token policy.
 Hardware adapters live in [v100_plus/sglang_v100_plus](v100_plus/sglang_v100_plus),
 reusable operators in [python/sglang/kernels/ops](python/sglang/kernels/ops), and
 build/Marlin changes in [v100_plus/aot](v100_plus/aot) and [v100_plus/patches](v100_plus/patches).
