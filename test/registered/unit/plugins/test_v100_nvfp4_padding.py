@@ -1,8 +1,6 @@
 """Misaligned NVFP4 shards must preserve both gated halves and scale bytes."""
 
-import json
 import sys
-import tempfile
 import unittest
 import weakref
 from pathlib import Path
@@ -24,7 +22,6 @@ with patch.object(
         decode_csf32_scales,
         expand_csf32_weights,
         expand_mxfp8_fixed_weights,
-        include_nested_shards,
         load_glm_csf_weights,
         normalize_block_fp8_weights,
     )
@@ -197,36 +194,6 @@ def csf32_fixture(rows=160, columns=65):
 
 
 class TestV100CSF32Checkpoint(CustomTestCase):
-    def test_default_source_includes_nested_indexed_shards(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            primary = root / "model.safetensors"
-            nested = root / "tensors" / "native-QB.safetensors"
-            nested.parent.mkdir()
-            primary.touch()
-            nested.touch()
-            (root / "model.safetensors.index.json").write_text(
-                json.dumps(
-                    {
-                        "weight_map": {
-                            "a.weight": primary.name,
-                            "b.weight": "tensors/native-QB.safetensors",
-                        }
-                    }
-                )
-            )
-            original = lambda *args: (folder, [str(primary)], True)
-            args = (original, None, folder, None, False)
-            self.assertEqual(
-                include_nested_shards(*args)[1], [str(primary), str(nested)]
-            )
-            self.assertEqual(
-                include_nested_shards(*args, [primary.name])[1], [str(primary)]
-            )
-            nested.unlink()
-            with self.assertRaisesRegex(ValueError, "Invalid nested"):
-                include_nested_shards(*args)
-
     def test_mxfp8_indexer_weighting_retains_fp32_operand_precision(self):
         prefix = "model.language_model.layers.45.self_attn.indexer.weights_proj"
         weight = torch.full((2, 64), 0.5).to(torch.float8_e4m3fn)

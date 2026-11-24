@@ -472,9 +472,12 @@ class TestV100Pipeline(CustomTestCase):
             receive_output, wire_receive, owner
         )
         owner._pp_prep_batch_result = prep
+        owner._pp_result_done_event = partial(
+            SchedulerPPMixin._pp_result_done_event, owner
+        )
         target = SimpleNamespace(forward_mode=ForwardMode.TARGET_VERIFY)
         batches = [target, None]
-        metadata = [object(), None]
+        metadata = [SimpleNamespace(forward_done=None), None]
         queue = deque()
 
         settings = dict(

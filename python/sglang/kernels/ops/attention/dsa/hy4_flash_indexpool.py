@@ -61,7 +61,6 @@ def _rope_quant_row(x, pos, inv_freq_ptr):
     freq = pos.to(tl.float32) * inv
     c = tl.cos(freq)
     s = tl.sin(freq)
-    # Gather the even/odd elements of each pair from x.
     even_idx = 64 + 2 * pair
     odd_idx = even_idx + 1
     xe = tl.gather(x, even_idx, 0)
@@ -806,6 +805,7 @@ def indexpool_expand(
         return out
     ragged = ragged_offsets is not None
     k = picked.shape[1]
+    assert (k + 1) * 4 <= topk, f"{k} picked groups and the tail exceed topk {topk}"
     _expand_kernel[(rows,)](
         picked,
         values if values is not None else picked,
@@ -860,6 +860,7 @@ def _window_kernel(
 
 
 def window_indices(positions, pages, row_to_batch, ragged_offsets, window, topk):
+    assert window <= topk, f"window {window} exceeds topk {topk}"
     rows = positions.shape[0]
     out = torch.empty((rows, topk), dtype=torch.int32, device=positions.device)
     if rows == 0:

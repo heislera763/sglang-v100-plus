@@ -45,7 +45,7 @@
   },
   "hashes_describe": "Original source content before compatibility edits; origin revision defaults to v100_fork unless specified.",
   "marlin_cutlass_revision": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
-  "current_upstream": "c3c292b65ab42efd933e0c77cfb48eb69f1b81d0",
+  "current_upstream": "f4284f29ba56fffe2d09c9e6c5ac5e218e6cc053",
   "upstream_backports": {},
   "consolidated": {
     "v100_plus/sglang_v100_plus/kernels/gdn.py": [

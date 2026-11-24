@@ -5,9 +5,7 @@ Decode serialized scale bytes before the ordinary TP sharding/Marlin loader.
 This does not reconstruct FP16 expert weights or add work during inference.
 """
 
-import json
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,44 +17,6 @@ _CSF_FIELDS = {
     "offsets": torch.uint16,
     "exceptions": torch.uint16,
 }
-
-
-def include_nested_shards(
-    original,
-    loader,
-    model_name_or_path,
-    revision,
-    fall_back_to_pt,
-    allow_patterns_overrides=None,
-):
-    """Complete default local sources with nested shards named by their index.
-
-    Upstream's root glob omits these even though its consistency check requires
-    them on disk. Preserve explicitly scoped source patterns and remote loaders.
-    """
-    result = original(
-        loader, model_name_or_path, revision, fall_back_to_pt, allow_patterns_overrides
-    )
-    folder, files, safetensors = result
-    if not safetensors or allow_patterns_overrides is not None or "://" in folder:
-        return result
-    root = Path(folder).resolve()
-    index = root / "model.safetensors.index.json"
-    if not index.is_file():
-        return result
-    selected = {Path(f).resolve() for f in files}
-    extra = []
-    for name in sorted(set(json.loads(index.read_text())["weight_map"].values())):
-        relative = Path(name)
-        if relative.parent == Path("."):
-            continue
-        path = root / relative
-        if relative.is_absolute() or ".." in relative.parts or not path.is_file():
-            raise ValueError(f"Invalid nested checkpoint shard: {name}")
-        if path.resolve() not in selected:
-            extra.append(str(path))
-            selected.add(path.resolve())
-    return folder, [*files, *extra], safetensors
 
 
 @lru_cache(maxsize=16)

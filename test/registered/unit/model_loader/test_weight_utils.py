@@ -138,6 +138,21 @@ class TestFilterDuplicateSafetensorsFiles(CustomTestCase):
                     allow_patterns=["transformer/*.safetensors"],
                 )
 
+    def test_default_local_load_adds_indexed_nested_shards(self):
+        nested = "tensors/model.safetensors"
+        first = "first.safetensors"
+        _touch(self.folder, nested)
+        _touch(self.folder, first)
+        with open(os.path.join(self.folder, INDEX_NAME), "w") as f:
+            json.dump({"weight_map": {"w": first, "b": nested}}, f)
+        files = [os.path.join(self.folder, first)]
+        self.assertEqual(
+            filter_duplicate_safetensors_files(
+                files, self.folder, INDEX_NAME, include_nested=True
+            ),
+            files + [os.path.join(self.folder, nested)],
+        )
+
     def test_local_index_allows_subset_of_existing_shards(self):
         _write_index(
             self.folder,

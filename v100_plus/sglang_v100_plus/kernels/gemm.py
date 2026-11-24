@@ -125,81 +125,6 @@ _SMALL_CONFIGS.update(
 )
 _SMALL_CONFIGS[(3, 1, 2560)] = (64, 32)
 
-# GLM-5.3-Flash's checkpoint-declared unquantized projections, TP8/TP4.
-# These use Volta cuBLAS for both decode and verification; they have no
-# custom small-GEMM implementation to fall back from.
-_GLM_BLAS_SHAPES = {
-    (264, 4096),
-    (272, 4096),  # FP4-Local KDA B/FG gates, separate from MXFP8 QKV (TP8/TP4)
-    (3336, 4096),
-    (6416, 4096),  # fused KDA QKV/beta/forget/norm gates
-    (2048, 4096),
-    (1536, 4096),
-    (512, 4096),  # MLA latent projections
-    (2048, 1536),
-    (4096, 1536),  # MLA queries and replicated indexer query
-    (4096, 512),
-    (8192, 512),  # MLA keys/values
-    (4096, 1024),
-    (4096, 2048),
-    (4096, 4096),  # KDA/MLA output
-    (128, 4096),  # replicated indexer key
-    (1024, 4096),
-    (4096, 256),  # unquantized NextN shared expert (TP4/TP8)
-    (768, 4096),
-    (3072, 4096),  # DFlash2 TP8 fused QKV and gate/up projections
-}
-
-# MiniMax's unquantized vocabulary, draft projections and candidate heads.
-# cuBLAS is the selected FP16 backend; packed target projections use W8A16.
-_MINIMAX_BLAS_SHAPES = {
-    (25008, 6144),
-    (50016, 6144),
-    (1280, 6144),
-    (1536, 6144),
-    (2560, 6144),
-    (3072, 6144),
-    (6144, 1024),
-    (6144, 1536),
-    (6144, 2048),
-    (6144, 3072),
-    (768, 30720),
-    (768, 36864),
-    (1536, 30720),
-    (6144, 36864),
-    (256, 6144),
-    (6144, 6144),
-}
-
-
-# Hy4 Flash TP8 keeps its unquantized attention, indexer and latent MoE
-# projections on cuBLAS. Routed block-FP8 experts use Marlin.
-_HY4_BLAS_SHAPES = {
-    (1600, 3072),  # fused MLA query/KV input
-    (1024, 1024),
-    (2048, 1024),  # query and indexer projections
-    (1792, 512),
-    (3584, 512),  # unabsorbed key/value projections
-    (1024, 3072),
-    (2048, 3072),  # attention output gate
-    (3072, 1024),
-    (3072, 2048),  # attention output
-    (1536, 3072),
-    (3072, 1536),  # replicated latent MoE transforms
-    (3456, 3072),
-    (3072, 1728),  # first dense FFN
-    (384, 3072),
-    (3072, 192),  # shared expert
-    (432, 1152),
-    (1152, 144),  # vision QKV and attention output
-    (538, 1152),
-    (1152, 538),  # vision FFN
-    (15104, 3072),  # vocabulary
-    (768, 6144),
-    (3072, 384),  # DFly hidden correction
-    (3072, 6144),  # DFly target hidden / token fusion
-}
-
 
 def shape_supported(x, weight):
     return (
@@ -211,10 +136,9 @@ def shape_supported(x, weight):
 def blas_supported(x, weight, bias=None):
     """Explicit Volta library paths, separate from small decode kernels.
 
-    Known small-kernel shapes must use that implementation or fail. cuBLAS
-    is the selected backend for prefill, Qwen's four-bank embedding projection,
-    the two untuned Qwen projections, and GLM's unquantized projections.
-    The GLM indexer head-weight projection intentionally stays FP32.
+    Plain contiguous FP16 projections use the Volta cuBLAS backend unless
+    a tuned small kernel owns the shape. Keep intentional FP32 projections
+    explicit so accidental dtype promotion is still visible in strict mode.
     """
     if not (
         x.is_cuda
@@ -243,23 +167,8 @@ def blas_supported(x, weight, bias=None):
             rows == 1
             and (shape in _DENSE_CONFIGS or (shape[1] == 2560 and shape[0] >= 32768))
         )
-        if native_small:
-            return False
-        if (
-            shape in _GLM_BLAS_SHAPES
-            or shape in _MINIMAX_BLAS_SHAPES
-            or shape in _HY4_BLAS_SHAPES
-        ) and bias is None:
-            return True
-        if rows in (2, 3, 4) and shape in ((1, 2560), (10240, 2560)):
-            return True
-        if weight.shape[1] == 4096 and weight.shape[0] >= 16384:
-            return True
-    elif x.shape[1:] == (4, 2560) and weight.shape == (2560, 2560):
-        return True
-    from sglang_v100_plus.dispatch import in_prefill
-
-    return in_prefill()
+        return not native_small
+    return True
 
 
 @cache_once

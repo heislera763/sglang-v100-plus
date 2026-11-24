@@ -115,6 +115,9 @@ def _normalize_quantization_config(quant: Optional[dict]) -> Optional[dict]:
 
 
 class HYV4FlashTextConfig(PretrainedConfig):
+    # PP carries all iHC streams; the draft receives the contracted hidden state.
+    hc_contract_for_draft = True
+
     model_type = "hy_v4_flash_text"
     base_config_key = "text_config"
     keys_to_ignore_at_inference = ["past_key_values"]

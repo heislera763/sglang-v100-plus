@@ -350,6 +350,16 @@ def moe_runner(original, cls, dispatch_name, runner_name):
         ):
             # Explicit SM70 W8A16 Marlin backend, including mapped EP rows.
             return fn(dispatch, quant, config)
+        if (
+            h.dtype == torch.float16
+            and quant.weight_bits == 4
+            and quant.w13_scales.dtype == quant.w2_scales.dtype == torch.float8_e8m0fnu
+            and quant.w13_qzeros is None
+            and quant.w2_qzeros is None
+            and torch.cuda.get_device_capability(h.device) == (7, 0)
+        ):
+            # The Volta MXFP4 Marlin kernel consumes E8M0 scales directly.
+            return fn(dispatch, quant, config)
         supported = (
             h.dtype == torch.float16
             and h.ndim == 2

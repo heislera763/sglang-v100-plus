@@ -1676,7 +1676,10 @@ class DeepseekV4AttnBackend(
             # The SM120 FP4 kernel schedules split_kv=128, while the generic
             # JIT metadata planner encodes split_kv=256.
             force_deep_gemm_metadata=(
-                self.enable_deepseek_v4_fp4_indexer and get_platform().is_sm120
+                # The c1/c2 full top-k always calls this kernel;
+                # SGLANG_FP8_PAGED_MQA_LOGITS_TORCH (on for SM120) drops its schedule.
+                (self.enable_deepseek_v4_fp4_indexer or compress_ratio in (1, 2))
+                and get_platform().is_sm120
             ),
             use_prefill_cuda_graph=use_prefill_cuda_graph,
             compress_ratio=compress_ratio,
@@ -4421,7 +4424,7 @@ class DeepseekV4AttnBackend(
                     compress_ratio
                 )
 
-            if swa_k_cache.dtype == torch.float16:
+            if get_platform().device_capability == (7, 0) and swa_k_cache.dtype == torch.float16:
                 from sglang.kernels.ops.attention.dsa.sm70_hca import hca_fp16
 
                 return hca_fp16(
