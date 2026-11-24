@@ -33,6 +33,7 @@ import torch
 from sglang.kernels.ops.attention.dsv4.sparse_prefill_kernels import (
     SPARSE_PREFILL_TOPK_ALIGNMENT,
 )
+from sglang.kernels.ops.attention.utils import concat_mla_absorb_q_general
 from sglang.srt.layers.attention.base_attn_backend import SharedReadEnds
 from sglang.srt.layers.attention.deepseek_v4_backend import (
     DEFAULT_INDEX_TOPK,
@@ -80,6 +81,12 @@ class Ernie5_5MlaAttnBackend(DeepseekSparseAttnBackend):
     def __init__(self, model_runner: ModelRunner, *, window: int, **kwargs):
         self.window = window
         super().__init__(model_runner, **kwargs)
+        if torch.device(
+            self.device
+        ).type == "cuda" and torch.cuda.get_device_capability(self.device) == (7, 0):
+            from sglang.srt.layers.attention.dsa.dsa_topk_backend import DSATopKBackend
+
+            self.dsa_topk_backend = DSATopKBackend.TORCH
         # Learnable sinks are only wired into flashmla_sparse.
         self.dsa_prefill_impl = "flashmla_sparse"
         self.dsa_decode_impl = "flashmla_sparse"
@@ -159,6 +166,31 @@ class Ernie5_5MlaAttnBackend(DeepseekSparseAttnBackend):
             self._graph_sched_meta = {}
         super().init_forward_metadata_out_graph(forward_batch, in_capture=in_capture)
 
+    def _has_sm70_sink_geometry(self, q_nope, kv_cache, v_head_dim):
+        return (
+            self.device_capability == (7, 0)
+            and q_nope.dtype == kv_cache.dtype == torch.float16
+            and v_head_dim == 512
+            and kv_cache.shape[-1] == 576
+        )
+
+    def _forward_sm70_sink(
+        self,
+        q_all,
+        kv_cache,
+        page_table_1,
+        sm_scale,
+        topk_length,
+        attn_sink,
+        *,
+        split,
+        ordered_window=False,
+    ):
+        # This model appends the sliding window after selecting prefix indices.
+        return self._forward_flashmla_sparse(
+            q_all, kv_cache, 512, page_table_1, sm_scale, topk_length, attn_sink
+        )
+
     def _forward_flashmla_sparse(
         self,
         q_all: torch.Tensor,
@@ -168,6 +200,7 @@ class Ernie5_5MlaAttnBackend(DeepseekSparseAttnBackend):
         sm_scale: float,
         topk_length: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
+        q_parts: tuple[torch.Tensor, torch.Tensor] | None = None,
         allow_small_heads: bool = False,
     ) -> torch.Tensor:
         """Attention reads ``top-k plus the last window``; a bf16 cache here is
@@ -176,6 +209,8 @@ class Ernie5_5MlaAttnBackend(DeepseekSparseAttnBackend):
             append_window_to_topk,
         )
 
+        if q_parts is not None:
+            q_all = concat_mla_absorb_q_general(*q_parts)
         metadata = self.forward_metadata
         num_rows = q_all.shape[0]
         page_table_1, topk_length = append_window_to_topk(
@@ -189,8 +224,25 @@ class Ernie5_5MlaAttnBackend(DeepseekSparseAttnBackend):
             ragged_offsets=metadata.topk_indices_offset,
         )
         keep = self._read_rows
-        if keep is not None and kv_cache.dtype == torch.bfloat16:
+        if keep is not None and kv_cache.dtype in (torch.float16, torch.bfloat16):
             topk_length = topk_length.masked_fill(~keep, 0)
+        if kv_cache.dtype == torch.float16:
+            from sglang.kernels.ops.attention.dsa.sm70_sparse_mla import sparse_mla_sm70
+
+            kv = kv_cache.reshape(-1, q_all.shape[-1])
+            outputs = [
+                sparse_mla_sm70(
+                    q,
+                    kv,
+                    page_table_1,
+                    topk_length,
+                    sink,
+                    sm_scale,
+                    split=num_rows <= 8,
+                )
+                for q, sink in zip(q_all.split(16, dim=1), attn_sink.split(16))
+            ]
+            return torch.cat(outputs, dim=1) if len(outputs) > 1 else outputs[0]
         if kv_cache.dtype == torch.bfloat16 and q_all.shape[1] == 64:
             # The parent pads q to 128 heads on Blackwell; the 64-head build skips
             # that copy and half the work.

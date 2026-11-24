@@ -34,6 +34,7 @@ Pinned benchmark sources; sizes are weight-file totals, **not runtime VRAM**.
 
 | Checkpoint | Revision | Composition | Files |
 | --- | --- | --- | ---: |
+| [Baidu ERNIE 5.5 Flash Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview/tree/9e1f08fd86d1a0c232f6572e617ea9cc98775ec6) | `9e1f08fd86d1` | Block FP8 projections, group32 MXFP4 routed experts, bundled DSpark | 154.51 GiB |
 | [Tencent Hy4 Flash FP8](https://huggingface.co/tencent/Hy4-flash-FP8/tree/003107fa248f5892064ab1c43af0a7003dd68c9b) | `003107fa248f` | FP8 routed experts and projections, BF16 Engram and vision weights, built-in five-layer DFly2 | 267.36 GiB |
 | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8/tree/236dfdf285828023ca3bcd3f37366c58a3469b13) | `236dfdf28582` | Official 128×128 block FP8, BF16 exclusions; FP8 PLE/MTP experts | 172.78 GiB |
 | [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4/tree/da920bb0b9f4a06727223a349e55468e38352348) | `da920bb0b9f4` | ModelOpt abs-max NVFP4; main shared experts remain BF16; FP8 KV metadata | 190.40 GiB |
@@ -273,6 +274,15 @@ the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
 | Other switches | GLM metadata/sample graphs and alternate NVFP4 MoE GEMV remain off without a model-level benefit. Qwen metadata graphs retain their qualified PP2 use. Generic split-K/decode and attention/expert-topology trials that lost were removed. |
 
 ## Performance and validation
+
+**ERNIE 5.5 Flash Preview on eight V100s.** TP8, one request, 131,072 context, FP16 KV, Baidu's seven-token DSpark and native reasoning/tool parsers. The checkpoint supplies temperature 1.0 and top-p 0.95. Volta uses FP16 activations, the MXFP4 Marlin expert backend and the PyTorch sampler. Set the static memory fraction to 0.86 and cap the token pool at 131,328 for this 32 GiB-per-GPU layout.
+
+| Tokens/s | First working Volta port | Optimized Volta port |
+| --- | ---: | ---: |
+| Prefill | 573 | 1,499 |
+| Sampled decode | 33.1 | 38.3 |
+
+Means of two uncached 3,772-token document requests per build. DSpark averaged 3.56 and 3.55 tokens per verification cycle respectively. The optimized indexer decodes each E4M3 bank once and uses FP16 Tensor Cores with FP32 scores. Large prefills exchange FP16 head slices across ranks to compute cross-head mixing locally in FP32. A separate 8,131-token request measured 1,287 prefill and 42.3 decode tokens/s. Both documents returned the requested record, and the native tool parser returned a structured call.
 
 **Hy4 Flash FP8 on eight V100s.** TP8/EP4, FP16 KV, 262,144 context, vision, batch one. Prefill is effective uncached input throughput on 8.4K code and 9.6K document prompts. Generation averages those prompts and a short thinking chat at 160 output tokens. Code is greedy. Document and chat use temperature 0.9 and top-p 1.
 

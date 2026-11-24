@@ -171,7 +171,7 @@ def _load_fused_indexer_wk(
     """
     fused_name = name.rsplit(".indexer.", 1)[0] + ".indexer.wk_weights_proj.weight"
     fused_param = params_dict.get(fused_name)
-    if fused_param is None or fused_param.dtype != torch.bfloat16:
+    if fused_param is None or fused_param.dtype not in (torch.float16, torch.bfloat16):
         return False
 
     if ".indexer.weights_proj." in name:
@@ -189,7 +189,7 @@ def _load_fused_indexer_wk(
             pending.pop(fused_name + ".weights_proj")
             block_size = _get_indexer_weight_block_size(quant_config)
             weights_bf16 = block_quant_dequant(
-                entry["weight"], entry["scale"], block_size, torch.bfloat16
+                entry["weight"], entry["scale"], block_size, fused_param.dtype
             )
             fused_param.data[-weights_bf16.shape[0] :].copy_(weights_bf16)
         return True
@@ -209,7 +209,7 @@ def _load_fused_indexer_wk(
         pending.pop(fused_name)
         block_size = _get_indexer_weight_block_size(quant_config)
         wk_bf16 = block_quant_dequant(
-            entry["weight"], entry["scale"], block_size, torch.bfloat16
+            entry["weight"], entry["scale"], block_size, fused_param.dtype
         )
         fused_param.data[: wk_bf16.shape[0]].copy_(wk_bf16)
     return True
@@ -774,7 +774,7 @@ class DeepseekV2WeightLoaderMixin:
                                 weight,
                                 weight_scale,
                                 weight_block_size,
-                                torch.bfloat16,
+                                torch.float16 if _is_cuda and current_arch().is_sm(7) else torch.bfloat16,
                             )
                     else:
                         w, scale = block_quant_to_tensor_quant(

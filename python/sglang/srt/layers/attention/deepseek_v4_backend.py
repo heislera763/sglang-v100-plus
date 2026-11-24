@@ -259,7 +259,7 @@ def _pad_last_dim(x: T, multiples_of: int = PAGE_INDEX_ALIGNED_SIZE) -> T:
 
 
 def _create_flashmla_metadata():
-    if get_platform().is_sm120 or _is_xpu:
+    if get_platform().device_capability == (7, 0) or get_platform().is_sm120 or _is_xpu:
         return None
     from sglang.kernels.ops.attention.flash_mla_interface import get_mla_metadata
 
@@ -958,7 +958,7 @@ class DSV4AttnMetadata:
             )
 
     def init_flashmla_related(self, is_prefill: bool = False, low_ratio_buffers=None):
-        assert self.index_topk in (512, 1024), (
+        assert not self.has_c4 or self.index_topk in (512, 1024), (
             f"unexpected index_topk={self.index_topk}; "
             "supported: 512 (small) or 1024 (large)"
         )
@@ -1371,7 +1371,7 @@ class DeepseekV4AttnBackend(
 
         self.req_to_token_pool = model_runner.req_to_token_pool
         self.token_to_kv_pool: DeepSeekV4TokenToKVPool = model_runner.token_to_kv_pool
-        if is_cuda():
+        if is_cuda() and get_platform().device_capability != (7, 0):
             from sglang.kernels.ops.attention import flash_mla_interface
 
             self._swa_interleaved = (
@@ -4421,6 +4421,20 @@ class DeepseekV4AttnBackend(
                     compress_ratio
                 )
 
+            if swa_k_cache.dtype == torch.float16:
+                from sglang.kernels.ops.attention.dsa.sm70_hca import hca_fp16
+
+                return hca_fp16(
+                    q,
+                    swa_k_cache,
+                    core_attn_metadata.swa_page_indices,
+                    core_attn_metadata.swa_topk_lengths,
+                    extra_k_cache,
+                    extra_indices,
+                    extra_topk_lengths,
+                    attn_sink,
+                    self.softmax_scale,
+                )
             swa_kv_page_size = token_to_kv_pool.get_swa_key_page_size()
             assert swa_k_cache.ndim == 2
             # The kernel detects each cache's format from the last dim of this

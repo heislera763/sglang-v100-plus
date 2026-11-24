@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+    _decode_e4m3fn,
     _hadamard_stage,
     _quantize_row,
 )
@@ -111,22 +112,6 @@ def _pool4_decode_write(
             tail_pos = prefix % TAIL_SIZE
             tl.store(TAIL_K + req * TAIL_SIZE * 128 + tail_pos * 128 + cols, key)
             tl.store(TAIL_G + req * TAIL_SIZE * 128 + tail_pos * 128 + cols, gate)
-
-
-@triton.jit
-def _decode_e4m3fn(encoded):
-    bits = encoded.to(tl.int32)
-    exponent = (bits >> 3) & 15
-    mantissa = bits & 7
-    normal = ((exponent + 120) << 23) | (mantissa << 20)
-    value = tl.where(
-        exponent == 0,
-        mantissa.to(tl.float32) * 2**-9,
-        normal.to(tl.float32, bitcast=True),
-    )
-    value = tl.where((bits & 127) == 127, float("nan"), value)
-    # Multiplication preserves negative zero for the FP8 sign bit.
-    return value * tl.where((bits & 128) != 0, -1.0, 1.0)
 
 
 @triton.jit

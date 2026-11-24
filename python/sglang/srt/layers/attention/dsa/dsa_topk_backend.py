@@ -107,6 +107,38 @@ class DSATopKBackend(Enum):
         if not envs.SGLANG_DSA_FUSE_TOPK.get() or force_unfused_topk:
             return self.topk_func(logits, lengths, topk, row_starts=row_starts)
 
+        if self.is_torch():
+            if logits.shape[1] <= topk and row_starts is None:
+                cols = torch.arange(topk, dtype=torch.int32, device=logits.device)
+                local = torch.where(
+                    cols < lengths.clamp_max(logits.shape[1])[:, None], cols, -1
+                )
+            else:
+                local = _topk_unfused(logits, lengths, topk, row_starts=row_starts)
+            if topk_transform_method == TopkTransformMethod.RAGGED:
+                return torch.where(local >= 0, local + topk_indices_offset[:, None], -1)
+            if topk_transform_method == TopkTransformMethod.PAGED:
+                table = attn_metadata.real_page_table
+                if batch_idx_list is not None:
+                    table = table[batch_idx_list]
+                if cu_seqlens_q_topk is None:
+                    rows = torch.arange(local.shape[0], device=local.device)
+                else:
+                    rows = torch.searchsorted(
+                        cu_seqlens_q_topk[1:],
+                        torch.arange(
+                            local.shape[0],
+                            dtype=cu_seqlens_q_topk.dtype,
+                            device=local.device,
+                        ),
+                        right=True,
+                    )
+                page = attn_metadata.page_size
+                ids = local.clamp_min(0)
+                physical = table[rows[:, None], ids // page] * page + ids % page
+                return torch.where(local >= 0, physical.to(torch.int32), -1)
+            raise ValueError(f"Unsupported DSA index mapping {topk_transform_method}")
+
         # Decode-shaped PAGED top-k for the SGL backend (plain decode AND spec
         # verify / draft-extend, whose expanded rows match the same shape) routes
         # to the DeepSeek-V4 top-k v2 JIT kernel. It fuses top-k selection and the

@@ -151,6 +151,31 @@ def _dense_repack(weight, num_bits=4):
     return result
 
 
+def prepare_mxfp4_situ_moe(layer):
+    """ERNIE loads gate and up into separate contiguous halves of w13."""
+    from sglang.srt.layers.utils import copy_or_rebind_param
+
+    if layer.params_dtype != torch.float16:
+        raise ValueError("SM70 MXFP4 Marlin requires FP16 activations")
+    for prefix in ("w13", "w2"):
+        weight_name = prefix + "_weight"
+        weight = getattr(layer, weight_name)
+        source = weight_name + "_scale_inv"
+        scales = getattr(layer, source)
+        experts, n, packed_k = weight.shape
+        if scales.dtype != torch.float8_e8m0fnu or scales.shape != (
+            experts,
+            n,
+            packed_k // 16,
+        ):
+            raise ValueError("Expected one E8M0 scale per 32 packed MXFP4 values")
+        # The SM70 routed kernel reads E8M0 in logical output-column order.
+        logical = scales.view(torch.uint8).transpose(1, 2).contiguous()
+        copy_or_rebind_param(layer, weight_name, _dense_repack(weight))
+        copy_or_rebind_param(layer, source, logical.view(torch.float8_e8m0fnu))
+        setattr(layer, weight_name + "_scale", getattr(layer, source))
+
+
 def pad_nvfp4_expert_width(layer):
     """Preserve both gated halves when an 80-wide shard needs a 64-column tile."""
     from sglang.srt.layers.utils import copy_or_rebind_param

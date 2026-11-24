@@ -12,13 +12,14 @@ import torch
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
-def _index_score_kernel(shared_keys, capacity):
+def _index_score_kernel(shared_keys, capacity, heads=32, has_starts=False):
     rows = T.dynamic("rows")
     if shared_keys:
         capacity = T.dynamic("capacity")
     banks = 1 if shared_keys else rows
     rows_per_block = 2 if shared_keys else 1
-    heads, dim, block = 32, 128, 64
+    dim, block = 128, 64
+    bounds_per_row = 2 if has_starts else 1
 
     @T.prim_func
     def index_score_sm70_kernel(
@@ -26,7 +27,7 @@ def _index_score_kernel(shared_keys, capacity):
         K: T.Tensor([banks, capacity, dim], T.float16),
         S: T.Tensor([banks, capacity], T.float32),
         W: T.Tensor([rows, heads], T.float32),
-        L: T.Tensor([rows], T.int32),
+        L: T.Tensor([bounds_per_row * rows], T.int32),
         Output: T.Tensor([rows, capacity], T.float32),
     ):
         with T.Kernel(
@@ -41,7 +42,8 @@ def _index_score_kernel(shared_keys, capacity):
             bank = 0 if shared_keys else first
             longest = T.min(capacity, T.max(0, T.max(L[first], L[last])))
             start = tile * block
-            if start < longest:
+            earliest = T.min(L[rows + first], L[rows + last]) if has_starts else 0
+            if start < longest and start + block > earliest:
                 for n, d in T.Parallel(block, dim):
                     ks[n, d] = T.if_then_else(
                         start + n < longest, K[bank, start + n, d], 0
@@ -69,7 +71,8 @@ def _index_score_kernel(shared_keys, capacity):
                         for n in T.Parallel(block):
                             if start + n < capacity:
                                 Output[row, start + n] = T.if_then_else(
-                                    start + n < length,
+                                    start + n < length
+                                    and (not has_starts or start + n >= L[rows + row]),
                                     result[n] * S[bank, start + n],
                                     -T.infinity(T.float32),
                                 )
@@ -84,7 +87,7 @@ def _index_score_kernel(shared_keys, capacity):
     return index_score_sm70_kernel
 
 
-def mqa_logits_sm70(query, keys, key_scales, weights, lengths):
+def mqa_logits_sm70(query, keys, key_scales, weights, lengths, starts=None):
     """FP32 weighted scores with causal masking and FP16 Tensor Core operands.
 
     Keys are shared [history,128] or per-query [rows,history,128]. Software-FP8
@@ -99,7 +102,8 @@ def mqa_logits_sm70(query, keys, key_scales, weights, lengths):
         query.is_cuda
         and torch.cuda.get_device_capability(query.device) == (7, 0)
         and query.ndim == 3
-        and query.shape[1:] == (32, 128)
+        and query.shape[1] in (32, 64)
+        and query.shape[2] == 128
         and query.dtype in (torch.float16, torch.float8_e4m3fn)
         and keys.ndim in (2, 3)
         and (shared or (1 <= query.shape[0] <= 8 and keys.shape[0] == query.shape[0]))
@@ -110,12 +114,20 @@ def mqa_logits_sm70(query, keys, key_scales, weights, lengths):
         and key_scales.shape in scale_shapes
         and weights.shape == query.shape[:2]
         and key_scales.dtype == weights.dtype == torch.float32
+        and (
+            starts is None
+            or (
+                starts.shape == lengths.shape
+                and starts.dtype == torch.int32
+                and starts.device == query.device
+            )
+        )
         and lengths.numel() == query.shape[0]
         and lengths.dtype == torch.int32
         and all(t.device == query.device for t in (keys, key_scales, weights, lengths))
     ):
         raise ValueError(
-            "SM70 index scoring requires [rows,32,128] FP16/FP8 queries, "
+            "SM70 index scoring requires [rows,32|64,128] FP16/FP8 queries, "
             "aligned shared/per-query FP16 keys, FP32 scales/weights and int32 lengths"
         )
     rows, capacity = query.shape[0], keys.shape[-2]
@@ -125,12 +137,17 @@ def mqa_logits_sm70(query, keys, key_scales, weights, lengths):
         if query.data_ptr() % 16:
             raise ValueError("SM70 index scoring queries require 16-byte alignment")
         banks = 1 if shared else rows
-        _index_score_kernel(shared, None if shared else capacity)(
+        bounds = lengths.reshape(-1).contiguous()
+        if starts is not None:
+            bounds = torch.cat((bounds, starts.reshape(-1)))
+        _index_score_kernel(
+            shared, None if shared else capacity, query.shape[1], starts is not None
+        )(
             query,
             keys.reshape(banks, capacity, 128),
             key_scales.reshape(banks, capacity).contiguous(),
             weights.contiguous(),
-            lengths.reshape(-1).contiguous(),
+            bounds,
             output,
         )
     return output

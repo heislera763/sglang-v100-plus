@@ -6,11 +6,6 @@ https://github.com/deepseek-ai/DeepGEMM
 
 import torch
 
-from sglang.srt.utils import is_cuda
-
-if is_cuda():
-    import deep_gemm
-
 
 def mhc_mega_boundary(
     x,
@@ -38,6 +33,8 @@ def mhc_mega_boundary(
     on the capture stream to initialize DeepGEMM's per-stream barriers.
     ``y_fp8`` / ``y_gemm_sf`` also receive the normed rows as a DeepGEMM MXFP8 pair.
     """
+    import deep_gemm
+
     rows, hidden = x.shape
     hc = residual.shape[1]
     updated = torch.empty_like(residual)

@@ -157,6 +157,7 @@ def mhc_pre_sm70(
     *,
     fuse_projection=False,
     fuse_pointwise=False,
+    eps_outside_sqrt=False,
 ):
     """Return (FP32 post gates, FP32 residual mixing, FP16 layer input).
 
@@ -181,6 +182,7 @@ def mhc_pre_sm70(
     assert sinkhorn_repeat >= 1
     assert not fuse_projection or (1 <= m <= 8 and h == 4096)
     assert not fuse_pointwise or (m == 1 and h == 4096)
+    assert not (eps_outside_sqrt and (fuse_projection or fuse_pointwise))
     assert not (fuse_projection and fuse_pointwise)
     pre = torch.empty((m, hc), dtype=torch.float32, device=residual.device)
     post = torch.empty_like(pre)
@@ -225,14 +227,15 @@ def mhc_pre_sm70(
             mean = torch.empty(m, dtype=torch.float32, device=residual.device)
             _prepare_shard_module().run(residual, x, mean, 0)
             mixes = F.linear(x, fn)
-            rms = torch.rsqrt(mean + rms_eps)
+            rms = (mean.sqrt() + rms_eps).reciprocal() if eps_outside_sqrt else torch.rsqrt(mean + rms_eps)
         else:
             x = residual.view(m, hc * h).float()
             mixes = F.linear(x, fn)
             # FP16 -> FP32 owns a private copy. Enqueue projection first on
             # the same stream, then reuse that copy for the identical square
             # and mean reduction instead of allocating another full tensor.
-            rms = torch.rsqrt(x.square_().mean(-1) + rms_eps)
+            mean = x.square_().mean(-1)
+            rms = (mean.sqrt() + rms_eps).reciprocal() if eps_outside_sqrt else torch.rsqrt(mean + rms_eps)
         _finalize_kernel[(m,)](
             mixes,
             rms,

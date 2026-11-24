@@ -30,6 +30,7 @@ import torch
 
 from sglang.kernels.ops.quantization.dsa_quant_k_cache import fp8_ds_mla_row_width
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+    DeepSeekV4SingleKVPool,
     DeepSeekV4TokenToKVPool,
     ExtraHostRegion,
 )
@@ -96,7 +97,72 @@ class _StageLocalLayerCounter:
         self._counter.wait_until(layer_id - self._stage_start)
 
 
-class Ernie5_5TokenToKVPool(DeepSeekV4TokenToKVPool):
+class _FP16HcaPool(DeepSeekV4SingleKVPool):
+    """Page-major FP16 rows for both the sliding window and compressed history."""
+
+    def get_bytes_per_token(self):
+        return (self.qk_nope_head_dim + self.qk_rope_head_dim) * 2
+
+    def create_buffer(self, *, num_pages):
+        width = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.kv_cache_total_dim = width
+        self.bytes_per_page_padded = self.page_size * width * 2
+        return torch.zeros(
+            (num_pages * self.page_size, width), device=self.device, dtype=self.dtype
+        )
+
+    def set_key_buffer_fused(self, layer_id, loc, cache_k, freqs_cis=None):
+        assert freqs_cis is None
+        from sglang.kernels.ops.kvcache.dsv4_unified_kv_store import (
+            scatter_bf16_into_unified,
+        )
+
+        scatter_bf16_into_unified(
+            kv=cache_k.reshape(-1, self.kv_cache_total_dim).contiguous(),
+            loc=loc.contiguous(),
+            unified_kv=self.kv_buffer[layer_id],
+        )
+
+
+class ErnieFP16TokenToKVPool(DeepSeekV4TokenToKVPool):
+    def _make_kv_pool(self, **kwargs):
+        if kwargs["dtype"] == torch.float16:
+            kwargs["cls"] = _FP16HcaPool
+        return super()._make_kv_pool(**kwargs)
+
+    def set_swa_key_buffer_radix_fused(self, layer_id, swa_loc, cache_k):
+        if not isinstance(self.swa_kv_pool, _FP16HcaPool):
+            return super().set_swa_key_buffer_radix_fused(layer_id, swa_loc, cache_k)
+        from sglang.kernels.ops.kvcache.dsv4_unified_kv_store import (
+            scatter_bf16_into_unified,
+        )
+
+        scatter_bf16_into_unified(
+            kv=cache_k.reshape(-1, cache_k.shape[-1]).contiguous(),
+            loc=swa_loc.contiguous(),
+            unified_kv=self.get_swa_key_buffer_radix(layer_id),
+        )
+
+    def set_swa_key_buffer_radix_fused_norm_rope(
+        self, layer_id, swa_loc, kv, kv_weight, eps, freqs_cis, positions, q=None
+    ):
+        if not isinstance(self.swa_kv_pool, _FP16HcaPool):
+            return super().set_swa_key_buffer_radix_fused_norm_rope(
+                layer_id, swa_loc, kv, kv_weight, eps, freqs_cis, positions, q
+            )
+        from sglang.kernels.ops.attention.dsv4.rope import apply_rotary_emb_triton
+
+        normalized = torch.nn.functional.rms_norm(
+            kv.float(), (kv.shape[-1],), kv_weight.float(), eps
+        ).half()
+        rope_dim = 2 * freqs_cis.shape[-1]
+        apply_rotary_emb_triton(normalized[..., -rope_dim:], freqs_cis, positions)
+        if q is not None:
+            apply_rotary_emb_triton(q[..., -rope_dim:], freqs_cis, positions)
+        self.set_swa_key_buffer_radix_fused(layer_id, swa_loc, normalized)
+
+
+class Ernie5_5TokenToKVPool(ErnieFP16TokenToKVPool):
     @staticmethod
     def stage_kwargs(hf_config, start_layer: int, end_layer: int) -> dict:
         return dict(
@@ -141,7 +207,7 @@ class Ernie5_5TokenToKVPool(DeepSeekV4TokenToKVPool):
             size=size,
             page_size=DSA_PAGE_SIZE,
             kv_lora_rank=mla_kv_lora_rank,
-            dtype=torch.float8_e4m3fn if fp8 else torch.bfloat16,
+            dtype=self.dtype,
             qk_rope_head_dim=mla_qk_rope_head_dim,
             device=self.device,
             index_head_dim=index_head_dim,
@@ -246,6 +312,7 @@ class Ernie5_5PoolConfigurator(DSV4PoolConfigurator):
     and no SWA buffer (Ernie5_5TokenToKVPool.swa_layer_ids)."""
 
     def __init__(self, kvc: KVCacheConfigurator):
+        self._fp16_hca = kvc.kv_cache_dtype == torch.float16
         self._hf_config = kvc.model_config.hf_config
         self.use_fp4_indexer = get_exec().kernel.enable_fp4_indexer
         stage = range(kvc.layer_info.start_layer, kvc.layer_info.end_layer)
@@ -256,6 +323,11 @@ class Ernie5_5PoolConfigurator(DSV4PoolConfigurator):
             and not kvc.spec_algorithm.is_dspark()
         )
         super().__init__(kvc)
+
+    def _get_paged_kv_bytes_per_token(self, compress_ratio=0):
+        if self._fp16_hca:
+            return self.attn_head_dim * 2
+        return super()._get_paged_kv_bytes_per_token(compress_ratio)
 
     @property
     def num_swa_layers(self) -> int:

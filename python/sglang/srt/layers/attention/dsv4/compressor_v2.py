@@ -226,6 +226,25 @@ class CompressorBackendMixin:
             kv_layout = token_to_kv_pool.get_extra_key_layout(layer_id)
             if hasattr(compress_kv_pool, "translate_loc_to_hisparse_device"):
                 out_loc = compress_kv_pool._translate_loc_to_hisparse_device(out_loc)
+        if kv_cache.dtype == torch.float16 and not compressor.is_in_indexer:
+            from sglang.kernels.ops.attention.dsa.sm70_hca import store_compressed_fp16
+
+            plan = self._get_paged_compress_metadata(compressor.ratio)
+            scores = state_pool.kv_score_buffer.kv_score.view(
+                -1, 128, 2 * compressor.head_dim
+            )
+            kv = compress_forward(
+                scores,
+                kv_score_input,
+                compressor.ape,
+                plan,
+                compress_ratio=128,
+                head_dim=compressor.head_dim,
+            )
+            store_compressed_fp16(
+                kv, plan, out_loc, compressor.norm, compressor.freqs_cis, kv_cache
+            )
+            return
         self._forward_compress_all_in_one(
             kv_score_buffer=state_pool.kv_score_buffer.kv_score,
             kv_score_input=kv_score_input,

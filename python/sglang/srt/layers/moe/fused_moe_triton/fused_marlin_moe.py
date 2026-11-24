@@ -241,7 +241,10 @@ def fused_marlin_moe(
         and w2_global_scale is not None
     )
     if is_mxfp4_marlin:
-        assert hidden_states.dtype == torch.bfloat16, (
+        assert hidden_states.dtype == torch.bfloat16 or (
+            hidden_states.dtype == torch.float16
+            and torch.cuda.get_device_capability(hidden_states.device) == (7, 0)
+        ), (
             "MXFP4 Marlin with E8M0 scales is only instantiated for bfloat16 "
             f"activations, got {hidden_states.dtype}"
         )

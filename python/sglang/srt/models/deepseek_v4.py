@@ -1397,6 +1397,7 @@ class MQALayer(MqaAttentionBase):
         prefix: str = "",
         alt_streams: Optional[List[torch.cuda.Stream]] = None,
         compress_ratio_override: Optional[int] = None,
+        wo_a_fp8: bool | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -1404,6 +1405,7 @@ class MQALayer(MqaAttentionBase):
             quant_config,
             prefix,
             compress_ratio=compress_ratio_override,
+            wo_a_fp8=wo_a_fp8,
         )
 
         active_rope_scaling = None

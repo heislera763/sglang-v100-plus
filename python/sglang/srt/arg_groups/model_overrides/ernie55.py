@@ -28,6 +28,7 @@ from sglang.srt.arg_groups.model_overrides.deepseek_v4 import (
 )
 from sglang.srt.configs.ernie55 import ERNIE5_5_MOE_ARCH
 from sglang.srt.environ import envs
+from sglang.srt.runtime_context import get_platform
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ def _ernie55_overrides(server_args: Any, hf_config: Any) -> dict:
         "attention_backend": "ernie55",
         "page_size": DSV4_PAGE_SIZE,
     }
-    if cfg.kv_cache_dtype == "auto":
+    if cfg.kv_cache_dtype == "auto" and get_platform().device_capability != (7, 0):
         logger.warning(
             "ERNIE 5.5 Flash defaults --kv-cache-dtype to fp8_e4m3; "
             "pass --kv-cache-dtype bfloat16 to keep the latent cache in bf16."

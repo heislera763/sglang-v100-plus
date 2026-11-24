@@ -37,6 +37,56 @@ def sm70_runtime():
 
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 0),
+    reason="Requires the Volta MXFP4 Marlin extension",
+)
+def test_sm70_mxfp4_situ_expert(sm70_runtime):
+    """Neighbouring E8M0 scale lanes must follow their own output channels."""
+    from sglang.srt.plugins import load_plugins
+    from sglang_v100_plus.quantization import prepare_mxfp4_situ_moe
+
+    load_plugins()
+    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
+
+    layer = torch.nn.Module()
+    layer.params_dtype = torch.float16
+    refs = []
+    for name, n, k in (("w13", 512, 128), ("w2", 128, 256)):
+        # Two E2M1 +1 values per byte, with different exponents along N and K.
+        packed = torch.full((1, n, k // 2), 0x22, device="cuda", dtype=torch.uint8)
+        exponents = torch.arange(n, device="cuda")[:, None] % 4
+        exponents = exponents - torch.arange(k // 32, device="cuda")[None, :] % 3 - 7
+        scales = (exponents + 127).byte().view(1, n, -1).view(torch.float8_e8m0fnu)
+        for suffix, tensor in (("_weight", packed), ("_weight_scale_inv", scales)):
+            setattr(
+                layer, name + suffix, torch.nn.Parameter(tensor, requires_grad=False)
+            )
+        refs.append(exponents.float().exp2().repeat_interleave(32, dim=1))
+    prepare_mxfp4_situ_moe(layer)
+    x = torch.full((16, 128), 0.125, device="cuda", dtype=torch.float16)
+    routes = torch.ones(16, 1, device="cuda")
+    actual = fused_marlin_moe(
+        x,
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale,
+        layer.w2_weight_scale,
+        routes,
+        routes,
+        torch.zeros_like(routes, dtype=torch.int32),
+        global_num_experts=1,
+        num_bits=4,
+        activation="situ",
+        gemm1_alpha=4,
+        clamp_limit=25,
+    )
+    gate, up = (x.float() @ refs[0].T).half().float().chunk(2, dim=1)
+    hidden = 4 * (gate / 4).tanh() * gate.sigmoid() * 25 * (up / 25).tanh()
+    expected = hidden.half().float() @ refs[1].T
+    torch.testing.assert_close(actual.float(), expected, rtol=0.001, atol=0.0002)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 0),
     reason="Requires the SM70 plugin and group32 Marlin extension",
 )
 @pytest.mark.parametrize(

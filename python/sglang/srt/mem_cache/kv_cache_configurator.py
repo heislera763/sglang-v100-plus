@@ -2181,6 +2181,17 @@ class KVCacheConfigurator:
             kv_layout_kwargs = dict(
                 kv_layout=kv_layout, compressed_kv_layout=compressed_kv_layout
             )
+            if (
+                self.is_draft_worker
+                and self.kv_cache_dtype == torch.float16
+                and self.model_config.hf_config.architectures[0]
+                == "Ernie5_5_MoeForCausalLMDSpark"
+            ):
+                from sglang.srt.mem_cache.ernie55_memory_pool import (
+                    ErnieFP16TokenToKVPool,
+                )
+
+                pool_cls = ErnieFP16TokenToKVPool
             if self.model_config.mla_layer_ids:
                 from sglang.srt.mem_cache.ernie55_memory_pool import (
                     Ernie5_5TokenToKVPool,

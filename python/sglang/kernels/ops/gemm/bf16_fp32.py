@@ -104,7 +104,7 @@ def hpc_bf16xfp32_gemm_enabled() -> bool:
 
 
 def _linear_bf16_fp32_cublas(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    if x.is_cuda and x.dtype == torch.bfloat16 and y.dtype == torch.bfloat16:
+    if x.is_cuda and x.dtype == y.dtype and x.dtype in (torch.float16, torch.bfloat16):
         return torch.mm(x, y.t(), out_dtype=torch.float32)
     return torch.mm(x.float(), y.float().t())
 

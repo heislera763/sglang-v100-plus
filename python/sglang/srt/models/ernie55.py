@@ -109,7 +109,7 @@ from sglang.srt.models.deepseek_v4 import (
     make_hc_head_params,
     make_hc_mixing_params,
 )
-from sglang.srt.runtime_context import get_parallel
+from sglang.srt.runtime_context import get_parallel, get_platform
 from sglang.srt.utils import BumpAllocator, is_cuda
 
 
@@ -183,6 +183,7 @@ class VhaPostMix(nn.Module):
         self.sharded = num_heads != total_heads
         self.vha_postmix_U = nn.Parameter(torch.zeros(num_heads, rank))
         self.vha_postmix_V = nn.Parameter(torch.zeros(num_heads, rank))
+        self.register_buffer("_all_head_factors", None, persistent=False)
         if self.sharded:
             for param in (self.vha_postmix_U, self.vha_postmix_V):
                 set_weight_attrs(
@@ -198,18 +199,53 @@ class VhaPostMix(nn.Module):
 
     def fold(self) -> None:
         if self.sharded:
-            # Nothing to fold: no rank holds the whole [H, H] product.
+            if self.vha_postmix_U.is_cuda and get_platform().device_capability == (
+                7,
+                0,
+            ):
+                group = get_parallel().attn_tp_group
+                if group.world_size >= 4:
+                    # Only the two small factors are replicated. Attention and
+                    # output projections remain head-sharded.
+                    local = torch.cat((self.vha_postmix_U, self.vha_postmix_V), dim=1)
+                    self._all_head_factors = group.all_gather(local, dim=0).float()
             return
         u, v = self.vha_postmix_U.data, self.vha_postmix_V.data
         eye = torch.eye(self.num_heads, dtype=u.dtype, device=u.device)
         # In place: a captured CUDA graph reads this buffer's address.
         self.mix.copy_(torch.addmm(eye, v, u.t()))
 
+    def _mix_token_shards(self, heads):
+        # Exchange FP16 heads, mix locally in FP32, and return each rank's heads.
+        # This replaces an FP32 all-reduce over the wider latent for every token.
+        group = get_parallel().attn_tp_group
+        world = group.world_size
+        rows, nheads, width = heads.shape
+        padding = -rows % world
+        if padding:
+            heads = torch.nn.functional.pad(heads, (0, 0, 0, 0, 0, padding))
+        send = heads.contiguous()
+        recv = torch.empty_like(send)
+        group.all_to_all_single(recv, send)
+        local = recv.reshape(world, -1, nheads, width).transpose(0, 1)
+        local = local.reshape(-1, world * nheads, width).float()
+        u, v = self._all_head_factors.chunk(2, dim=1)
+        mixed = (local + v @ (u.T @ local)).to(heads.dtype)
+        send = mixed.reshape(-1, world, nheads, width).transpose(0, 1).contiguous()
+        group.all_to_all_single(recv, send.view_as(recv))
+        return recv[:rows]
+
     def forward(self, o: torch.Tensor) -> torch.Tensor:
         # o: [T, ...] with trailing dims flattening to num_heads * d.
         heads = o.reshape(o.shape[0], self.num_heads, -1)
         if not self.sharded:
             return torch.matmul(self.mix, heads).reshape(o.shape)
+        if (
+            self._all_head_factors is not None
+            and heads.dtype == torch.float16
+            and heads.shape[0] >= 512
+        ):
+            return self._mix_token_shards(heads).reshape(o.shape)
         # fp32 throughout: a bf16 latent or residual add loses accuracy vs the fold.
         heads32 = heads.float()
         latent = torch.matmul(self.vha_postmix_U.t().float(), heads32)
@@ -281,7 +317,16 @@ class Ernie5_5GatedQMixin:
         )
         if q_out is None:
             q_out = q.new_empty(q.shape)
-        fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
+        if q.dtype == torch.float16 and get_platform().device_capability == (7, 0):
+            from sglang.kernels.ops.attention.dsv4.rope import apply_rotary_emb_triton
+
+            q_out.copy_(
+                torch.nn.functional.rms_norm(q.float(), (self.head_dim,), eps=self.eps)
+            )
+            rope_dim = self.freqs_cis.shape[-1] * 2
+            apply_rotary_emb_triton(q_out[..., -rope_dim:], self.freqs_cis, positions)
+        else:
+            fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
         return q_out
 
     def _take_gate(self) -> torch.Tensor:
@@ -306,7 +351,11 @@ class Ernie5_5HcaAttention(Ernie5_5GatedQMixin, MQALayer):
             quant_config=quant_config,
             prefix=prefix,
             alt_streams=alt_streams,
+            wo_a_fp8=False if get_platform().device_capability == (7, 0) else None,
         )
+        if get_platform().device_capability == (7, 0):
+            self.wo_a.half()
+            self.compressor.wkv_gate.half()
         self.postmix = VhaPostMix(self.n_local_heads, self.n_heads)
         self._init_gated_wq_b(quant_config, prefix)
         # The mix fuses into the UE8M0 fp8 wo_a quant, but only from the folded
@@ -317,6 +366,46 @@ class Ernie5_5HcaAttention(Ernie5_5GatedQMixin, MQALayer):
             and DEEPGEMM_SCALE_UE8M0
             and not self.postmix.sharded
         )
+
+    def forward(self, x, positions, forward_batch, *args, **kwargs):
+        if x.dtype != torch.float16 or get_platform().device_capability != (7, 0):
+            return super().forward(x, positions, forward_batch, *args, **kwargs)
+        if not x.shape[0]:
+            return x
+        from sglang.kernels.ops.attention.dsv4.rope import apply_rotary_emb_triton
+
+        backend = get_attn_backend()
+        if self.fuse_wqa_wkv:
+            qkv, _ = self.wqkv_a(x)
+            q_a, kv = qkv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        else:
+            q_a, _ = self.wq_a(x)
+            kv, _ = self.wkv(x)
+        q = self._gated_q_norm_rope(self.q_norm(q_a.contiguous()), positions)
+        kv = self.kv_norm(kv.contiguous())
+        apply_rotary_emb_triton(
+            kv[..., -self.qk_rope_head_dim :], self.freqs_cis, positions
+        )
+        backend.forward_unified(x, forward_batch, self.layer_id, self.compressor)
+        o = backend.forward(
+            q,
+            kv,
+            kv,
+            self.attn_mqa,
+            forward_batch,
+            compress_ratio=128,
+            attn_sink=self._local_attn_sink(self.n_local_heads),
+        )
+        o = self.postmix(o)
+        apply_rotary_emb_triton(
+            o[..., -self.qk_rope_head_dim :], self.freqs_cis, positions, inverse=True
+        )
+        o = torch.einsum(
+            "tgd,grd->tgr",
+            o.reshape(x.shape[0], self.n_local_groups, -1),
+            self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1),
+        )
+        return self._project_wo_b(o)
 
     def _compute_q_b(self, q, positions, q_out=None):
         return self._gated_q_norm_rope(q, positions, q_out)
@@ -379,6 +468,11 @@ class Ernie5_5MlaAttention(DeepseekV2AttentionMLA):
             layer_id=layer_id,
             prefix=prefix,
         )
+        if get_platform().device_capability == (7, 0):
+            for name in ("wk_weights_proj", "weights_proj"):
+                projection = getattr(self.indexer, name, None)
+                if projection is not None:
+                    projection.half()
         if not self.use_dsa or self.skip_topk:
             raise ValueError(
                 "ERNIE 5.5 Flash's MLA layers need the DSA indexer with top-k "
@@ -706,6 +800,22 @@ class Ernie5_5DecoderLayer(nn.Module):
                 residual.new_empty((0, hc, 1), dtype=torch.float32),
                 residual.new_empty((0, hc, hc), dtype=torch.float32),
             )
+        if residual.dtype == torch.float16 and get_platform().device_capability == (7, 0):
+            from sglang.kernels.ops.layernorm.mhc_sm70 import mhc_pre_sm70
+
+            post, comb, layer_input = mhc_pre_sm70(
+                residual.contiguous(),
+                fn,
+                scale,
+                base,
+                self.config.rms_norm_eps,
+                self.config.hc_eps,
+                self.config.hc_eps,
+                self.config.hc_post_mult_value,
+                self.config.hc_sinkhorn_iters,
+                eps_outside_sqrt=True,
+            )
+            return exact_rms_norm(layer_input, norm), post, comb
         post, comb, layer_input = mhc_pre(
             residual=residual,
             fn=fn,
@@ -729,6 +839,10 @@ class Ernie5_5DecoderLayer(nn.Module):
     def _hc_post(x, residual, post, comb):
         if x.shape[0] == 0:
             return torch.empty_like(residual)
+        if residual.dtype == torch.float16 and get_platform().device_capability == (7, 0):
+            from sglang.kernels.ops.layernorm.mhc_post_split_h import mhc_post_split_h
+
+            return mhc_post_split_h(x, residual, post, comb)
         return mhc_post(x, residual, post, comb)
 
     def ffn_reads_own_rows(self) -> bool:
@@ -1364,7 +1478,7 @@ class Ernie5_5WeightLoader:
                 pair["weight"].to(device),
                 pair["scale"].to(device),
                 [_WO_A_BLOCK, _WO_A_BLOCK],
-                torch.bfloat16,
+                self.params[name].dtype,
             ),
         )
 

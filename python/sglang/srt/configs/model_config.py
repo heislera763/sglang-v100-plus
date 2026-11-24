@@ -857,6 +857,8 @@ class ModelConfig:
         routed_experts_quant_method = quantization_config.get(
             "routed_experts_quant_method"
         )
+        if is_ernie5_5(self.hf_config) and routed_experts_quant_method is None:
+            routed_experts_quant_method = quantization_config.get("expert_dtype")
         self.is_fp4_experts: bool = routed_experts_quant_method == "mxfp4"
         if self.is_fp4_experts:
             logger.info("Detected mixed checkpoint layout: routed experts are MXFP4.")

@@ -1408,6 +1408,7 @@ class DeepseekSparseAttnBackend(
     def _get_fused_topk_page_table(self, topk_indices: torch.Tensor) -> torch.Tensor:
         if (
             self.dsa_topk_backend.is_sgl_kernel()
+            or self.dsa_topk_backend.is_torch()
             or self.dsa_topk_backend.is_flashinfer()
         ):
             return topk_indices

@@ -152,6 +152,17 @@ class Mxfp4MarlinMoEMethod:
             prepare_moe_mxfp4_layer_for_marlin,
         )
 
+        if (
+            self.runner.config.activation == "situ"
+            and layer.w13_weight.device.type == "cuda"
+            and torch.cuda.get_device_capability(layer.w13_weight.device) == (7, 0)
+        ):
+            from sglang_v100_plus.quantization import prepare_mxfp4_situ_moe
+
+            prepare_mxfp4_situ_moe(layer)
+            layer._dsv4_mxfp4_backend = "marlin"
+            return
+
         # Let the FP8 base method handle ROCm normalization, etc.
         self._fp8.process_weights_after_loading(layer)
 

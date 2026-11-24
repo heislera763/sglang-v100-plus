@@ -358,7 +358,9 @@ def fp8_mqa_logits_make_fused_kv(
 
 
 def _use_torch_mqa_logits() -> bool:
-    return envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get()
+    return envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get() or (
+        is_cuda() and torch.cuda.get_device_capability() == (7, 0)
+    )
 
 
 @lru_cache(maxsize=1)

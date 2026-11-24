@@ -665,7 +665,8 @@ def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("Volta shared-history index scoring")
     torch.manual_seed(753)
-    query = torch.randn(rows, 32, 128, device="cuda", dtype=torch.float16).to(
+    heads = 64 if capacity == 65 else 32
+    query = torch.randn(rows, heads, 128, device="cuda", dtype=torch.float16).to(
         torch.float8_e4m3fn
     )
     keys = (
@@ -674,11 +675,14 @@ def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
         .half()
     )
     scales = torch.rand(capacity, device="cuda") * 0.01
-    weights = torch.randn(rows, 32, device="cuda")
+    weights = torch.randn(rows, heads, device="cuda")
     lengths = torch.linspace(-1, capacity + 7, rows, device="cuda").int()
+    starts = (
+        torch.arange(rows, device="cuda", dtype=torch.int32) if heads == 64 else None
+    )
     values = (query, keys, scales, weights, lengths)
     saved = [x.clone() for x in values]
-    actual = mqa_logits_sm70(*values)
+    actual = mqa_logits_sm70(*values, starts=starts)
     assert actual.shape == (rows, capacity)
     if not rows or not capacity:
         return
@@ -687,12 +691,51 @@ def test_shared_prefill_scoring_masks_tails_and_matches_fp64(rows, capacity):
         * weights.cpu().double()[:, :, None]
     ).sum(1) * scales.cpu().double()[None, :]
     future = torch.arange(capacity)[None, :] >= lengths.cpu()[:, None]
+    if starts is not None:
+        future |= torch.arange(capacity)[None, :] < starts.cpu()[:, None]
     expected.masked_fill_(future, -torch.inf)
     assert torch.equal(torch.isneginf(actual.cpu()), future)
     torch.testing.assert_close(actual.cpu().double(), expected, rtol=2e-5, atol=2e-6)
     for value, snapshot in zip(values, saved):
         dtype = torch.uint8 if value.dtype == torch.float8_e4m3fn else value.dtype
         assert torch.equal(value.view(dtype), snapshot.view(dtype))
+
+
+def test_verify_rows_use_their_requests_page_table():
+    """Multiple verify rows per request must share pages and keep individual ends."""
+    if torch.cuda.get_device_capability() != (7, 0):
+        pytest.skip("Volta paged index scoring")
+    from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+        index_scores_sm70,
+        shared_paged_scores_sm70,
+    )
+
+    torch.manual_seed(1467)
+    page, width = 64, 105
+    keys = torch.randn(4, page, 128, device="cuda").to(torch.float8_e4m3fn)
+    scales = torch.rand(4, page, device="cuda")
+    cache = torch.cat(
+        (keys.view(torch.uint8).flatten(1), scales.view(torch.uint8)), dim=1
+    ).reshape(4, page, 1, 132)
+    tables = torch.tensor([[2, 0], [1, 3]], dtype=torch.int32, device="cuda")
+    q = torch.randn(4, 64, 128, device="cuda").to(torch.float8_e4m3fn)
+    weights = torch.randn(4, 64, device="cuda")
+    ends = torch.tensor([63, 69, 91, 105], dtype=torch.int32, device="cuda")
+    multi = index_scores_sm70(q, cache, scales, weights, ends, ends, width, tables)
+    for batch, physical in enumerate(tables.long()):
+        rows = slice(batch * 2, batch * 2 + 2)
+        k = keys.float()[physical].flatten(0, 1)[:width]
+        dots = torch.einsum("rhd,kd->rhk", q[rows].float(), k)
+        ref = (dots.relu() * weights[rows, :, None]).sum(1) * scales[
+            physical
+        ].flatten()[:width]
+        valid = torch.arange(width, device="cuda")[None, :] < ends[rows, None]
+        shared = shared_paged_scores_sm70(
+            q[rows], cache, weights[rows], ends[rows], tables[batch], width
+        )
+        torch.testing.assert_close(shared[valid], ref[valid], atol=3e-5, rtol=2e-5)
+        torch.testing.assert_close(multi[rows][valid], ref[valid], atol=3e-5, rtol=2e-5)
+        assert torch.isneginf(shared[~valid]).all()
 
 
 def test_shared_prefill_scoring_changed_graph_and_output_canaries():

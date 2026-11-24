@@ -171,6 +171,7 @@ def fused_experts_none_to_marlin(
         and quant_info.w13_scales.dtype == torch.float8_e8m0fnu
         and quant_info.w2_scales.dtype == torch.float8_e8m0fnu
         and hidden_states.dtype == torch.float16
+        and torch.cuda.get_device_capability(hidden_states.device) != (7, 0)
     ):
         # MXFP4(E8M0) Marlin kernels are only numerically valid on the bf16
         # activation path. The fp16 + E8M0 path is intentionally not generated

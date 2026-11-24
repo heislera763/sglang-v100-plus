@@ -1203,6 +1203,28 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
     ) -> None:
         if out_cache_loc is None:
             out_cache_loc = forward_batch.out_cache_loc
+        if (
+            key_raw.dtype == torch.float16
+            and self.is_neox_style
+            and self.fused_indexer_hadamard
+            and torch.cuda.get_device_capability(key_raw.device) == (7, 0)
+        ):
+            from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+                store_neox_index_key,
+            )
+
+            pool = get_token_to_kv_pool()
+            for buf, loc, rows in _index_k_write_targets(pool, layer_id, out_cache_loc):
+                store_neox_index_key(
+                    key_raw if rows is None else key_raw.index_select(0, rows),
+                    positions if rows is None else positions.index_select(0, rows),
+                    self._indexer_cos_sin_cache,
+                    self.k_norm,
+                    loc,
+                    buf,
+                    pool.index_page_size,
+                )
+            return
         if self.skip_rope:
             self._store_index_k_cache(
                 forward_batch=forward_batch,
@@ -1338,6 +1360,23 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
     def _fused_q_quant(
         self, q: torch.Tensor, weights_raw: torch.Tensor, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if (
+            q.dtype == torch.float16
+            and self.is_neox_style
+            and self.fused_indexer_hadamard
+            and torch.cuda.get_device_capability(q.device) == (7, 0)
+        ):
+            from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+                quant_neox_index_query,
+            )
+
+            return quant_neox_index_query(
+                q,
+                weights_raw,
+                positions,
+                self._indexer_cos_sin_cache,
+                self.softmax_scale * self.n_heads**-0.5,
+            )
         if self.skip_rope:
             return indexer_q_quant_head_gate(
                 q.contiguous(), weights_raw, self.softmax_scale, self.scale_fmt
@@ -1393,6 +1432,19 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         max_len: int,
         clean_logits: bool = False,
     ) -> torch.Tensor:
+        if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device) == (7, 0):
+            from sglang.kernels.ops.attention.dsa.sm70_indexer import index_scores_sm70
+
+            return index_scores_sm70(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                weights,
+                context_lens,
+                context_lens.contiguous(),
+                max_len,
+                block_table,
+            )
         return resolve_fp8_paged_mqa_logits_fn()(
             q_fp8,
             kv_cache_fp8,
@@ -1412,6 +1464,34 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         ks: torch.Tensor,
         ke: torch.Tensor,
     ) -> torch.Tensor:
+        if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device) == (7, 0):
+            from sglang.kernels.ops.attention.dsa.sm70_indexer import index_scores_sm70
+
+            keys, scales = kv_fp8
+            if q_fp8.shape[1] in (32, 64):
+                from sglang.kernels.ops.attention.dsa.sm70_indexer_score import (
+                    mqa_logits_sm70,
+                )
+
+                # Decode each packed operand once. The shared key tile then
+                # serves adjacent queries on Volta Tensor Cores.
+                return mqa_logits_sm70(
+                    q_fp8,
+                    keys.half().contiguous(),
+                    scales,
+                    weights.reshape(q_fp8.shape[:2]),
+                    ke,
+                    starts=ks,
+                )
+            return index_scores_sm70(
+                q_fp8,
+                keys,
+                scales,
+                weights,
+                ks.contiguous(),
+                ke.contiguous(),
+                keys.shape[0],
+            )
         q_padded, w_padded, _ = self._pad_heads_for_deep_gemm(q_fp8, weights)
         if use_bf16_indexer_logits():
             return fp8_mqa_logits_bf16(q_padded, kv_fp8, w_padded, ks, ke)
@@ -1646,7 +1726,27 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             return torch.cat(logits_chunks, dim=0)
 
         # verify_shares_index_k's 64-key pages imply AITER's preshuffled layout
-        if _use_aiter_gfx95 and dsa_indexer_hip.verify_shares_index_k(
+        if (
+            _is_cuda
+            and B == 1
+            and 0 < q_offset <= 8
+            and q_fp8.shape[1] in (32, 64)
+            and seqlens_32_2d.numel() == q_offset
+            and torch.cuda.get_device_capability(q_fp8.device) == (7, 0)
+        ):
+            from sglang.kernels.ops.attention.dsa.sm70_indexer import (
+                shared_paged_scores_sm70,
+            )
+
+            logits = shared_paged_scores_sm70(
+                q_fp8[:q_offset],
+                kv_cache_fp8,
+                weights[:q_offset],
+                seqlens_32_2d,
+                block_tables[0],
+                max_seq_len,
+            )
+        elif _use_aiter_gfx95 and dsa_indexer_hip.verify_shares_index_k(
             forward_batch, q_fp8, block_tables, page_size, q_offset, B, next_n, dcp_size
         ):
             logits = dsa_indexer_hip.verify_paged_mqa_logits(

@@ -85,6 +85,9 @@ class Ernie5_5DSparkAttention(Ernie5_5GatedQMixin, DSparkAttention):
             prefix=prefix,
             alt_streams=alt_streams,
         )
+        self.volta_fp16 = get_platform().device_capability == (7, 0)
+        if self.volta_fp16:
+            self.wo_a.half()
         # compress_ratio 0 selected the main rope, but the stages were trained on
         # the compressed YaRN rope of the HCA layers.
         self.rope_base = config.compress_rope_theta
@@ -118,7 +121,7 @@ class Ernie5_5DSparkAttention(Ernie5_5GatedQMixin, DSparkAttention):
             pool=pool,
         )
         q_padded = q_out = None
-        if self.n_local_heads < _PAD_NUM_HEADS:
+        if self.n_local_heads < _PAD_NUM_HEADS and not self.volta_fp16:
             q_padded = x.new_empty(x.shape[0], _PAD_NUM_HEADS, self.head_dim)
             q_out = q_padded[:, : self.n_local_heads]
         q = self._compute_q(x, positions, q_out=q_out)
@@ -129,17 +132,24 @@ class Ernie5_5DSparkAttention(Ernie5_5GatedQMixin, DSparkAttention):
             layer=self.attn,
             forward_batch=forward_batch,
             compress_ratio=0,
-            attn_sink=self._local_attn_sink(),
+            attn_sink=self._local_attn_sink(q.shape[1] if self.volta_fp16 else None),
             save_kv_cache=False,
         )
         o = o[:, : self.n_local_heads]
-        fused_rope_inplace(
-            o[..., -self.rope_head_dim :],
-            None,
-            self.freqs_cis,
-            positions=positions,
-            inverse=True,
-        )
+        if self.volta_fp16:
+            from sglang.kernels.ops.attention.dsv4.rope import apply_rotary_emb_triton
+
+            apply_rotary_emb_triton(
+                o[..., -self.rope_head_dim :], self.freqs_cis, positions, inverse=True
+            )
+        else:
+            fused_rope_inplace(
+                o[..., -self.rope_head_dim :],
+                None,
+                self.freqs_cis,
+                positions=positions,
+                inverse=True,
+            )
         o = self.postmix(o).reshape(o.shape[0], self.n_local_groups, -1)
         o = _apply_wo_a_bf16_matmul(
             o,
@@ -166,7 +176,7 @@ class Ernie5_5DSparkStage(Ernie5_5DecoderLayer):
     ):
         super().__init__(config, stage_id, quant_config, prefix, alt_streams)
         if stage_id == 0:
-            # Shipped in bf16, so it takes no quant config.
+            # Store the shared hidden projection in compute precision.
             self.main_proj = ReplicatedLinear(
                 config.hidden_size * num_target_layers,
                 config.hidden_size,
@@ -412,6 +422,21 @@ class _Ernie5_5DSparkWeightLoader(Ernie5_5WeightLoader):
         )
 
     def load(self, name: str, tensor: torch.Tensor) -> None:
+        if name.startswith("model.mtp.feature_projection.") and (
+            name.endswith("weight_scale_inv") or tensor.dtype == torch.float8_e4m3fn
+        ):
+            from sglang.srt.layers.quantization.fp8_utils import block_quant_dequant
+
+            target = "stages.0.main_proj.weight"
+            pair = self.pending_wo_a.setdefault(target, {})
+            pair["scale" if name.endswith("weight_scale_inv") else "weight"] = tensor
+            if "weight" in pair and "scale" in pair:
+                param = self.params[target]
+                self._load(target, block_quant_dequant(pair["weight"].to(param.device),
+                           pair["scale"].to(param.device), self.quant_config.weight_block_size,
+                           param.dtype))
+                del self.pending_wo_a[target]
+            return
         if name in self._DRAFT_TRANSPOSED:
             target = self._DRAFT_TRANSPOSED[name]
             self.params[target].data.copy_(tensor.t())

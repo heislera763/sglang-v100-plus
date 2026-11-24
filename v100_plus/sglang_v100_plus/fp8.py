@@ -170,13 +170,18 @@ def prepare_fp8_dense(original, method, layer):
     if (
         weight.dtype != torch.float8_e4m3fn
         or tuple(weight.shape) != (n, k)
-        or n % 128
-        or k % 128
-        or tuple(block_scales.shape) != (n // 128, k // 128)
+        or tuple(block_scales.shape) != ((n + 127) // 128, (k + 127) // 128)
     ):
         raise ValueError(
-            "SM70 dense FP8 dimensions must preserve complete 128x128 blocks"
+            f"Expected block128 FP8 weight {(n, k)} with one scale per block, "
+            f"got {weight.shape} {weight.dtype} and {block_scales.shape} scales"
         )
+    pn, pk = (n + 127) // 128 * 128, (k + 127) // 128 * 128
+    if (pn, pk) != (n, k):
+        weight = torch.nn.functional.pad(
+            weight.view(torch.uint8), (0, pk - k, 0, pn - n)
+        )
+        layer._sm70_fp8_physical_shape = (pn, pk)
     # The SM70 iterator consumes logical [K/group,N] scales, unlike the
     # SM80 dense Marlin wrapper's permuted scale layout.
     scales = fp8_fused_exponent_bias_into_scales(
