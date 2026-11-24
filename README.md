@@ -243,6 +243,19 @@ projection is column-sharded across TP ranks, saving 378MiB/rank without changin
 the full-K reduction. Radix's equivalent saves 315MiB, but that draft remains
 **unqualified** because acceptance collapses in the current FP16 integration.
 
+## Raw throughput by topology
+
+Consolidated baseline on two NVLink quads, one active request, FP16 KV and a 262,144-token configured window. Each value is the mean across three cold 8,192-token inputs (code, document analysis and writing), with normal checkpoint sampling and up to 256 output tokens. The target runs alone.
+
+| Model | TP8 prefill (tokens/s) | TP8 decode (tokens/s) | PP2×TP4 prefill (tokens/s) | PP2×TP4 decode (tokens/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Baidu ERNIE 5.5 Flash Preview | 1,341 | 17.6 | 2,144 | 18.4 |
+| Trohrbaugh Hy4 Flash FP8 | 2,673 | 40.1 | 3,198 | 36.2 |
+| Trohrbaugh Qwen Flash Next FP8 | 4,390 | 49.3 | 7,040 | 55.8 |
+| NVIDIA GLM 5.3 Flash FP4-Local | 2,544 | 45.2 | 2,860 | 44.7 |
+
+ERNIE and GLM use EP1. Hy4 uses EP4 on TP8 and EP2 on TP4. Qwen uses EP8 and EP4 respectively. GLM TP8 also uses DCP4. Qwen, Hy4 and GLM returned the correct image answer on both layouts. The ERNIE checkpoint is text-only.
+
 ## Settings and topology
 
 | Choice | Reason / limitation |
