@@ -454,7 +454,14 @@ def moe_wna16_marlin_gemm(
                 not _sm70_marlin_user_tuning
                 and getattr(b_scales, "_sm70_fp8_scale", False)
                 and size_m >= 128
-                and (size_n, size_k) in ((1280, 2560), (2560, 640))
+                and (
+                    (size_n, size_k) in ((1280, 2560), (2560, 640))
+                    or (
+                        b_q_weight.shape[0] == 256
+                        and moe_block_size == 64
+                        and (size_n, size_k) in ((1536, 1536), (1536, 768))
+                    )
+                )
                 and is_k_full
                 and not is_zp_float
                 and all(
