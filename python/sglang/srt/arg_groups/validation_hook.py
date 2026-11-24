@@ -234,11 +234,11 @@ def check_pipeline_parallel_compat(cfg: Any) -> None:
         )
     elif cfg.speculative_algorithm is not None:
         assert (
-            cfg.speculative_algorithm.upper() == "EAGLE"
+            cfg.speculative_algorithm.upper() in ("EAGLE", "DFLY")
             and not cfg.enable_multi_layer_eagle
         ), (
             "Pipeline parallelism currently only supports EAGLE "
-            "(non-multi-layer) speculative decoding"
+            "(non-multi-layer) or DFLY speculative decoding"
         )
         if envs.SGLANG_ENABLE_PP_SPEC.get():
             # The aggregate relay carries an EAGLE-shaped tree and only

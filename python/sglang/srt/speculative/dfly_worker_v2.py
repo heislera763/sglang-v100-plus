@@ -6,6 +6,7 @@ from sglang.kernels.ops.speculative.cache_locs import assign_extend_cache_locs_f
 from sglang.kernels.ops.speculative.dflash import (
     compute_dflash_correct_drafts_and_bonus,
 )
+from sglang.srt.distributed.parallel_state import graph_capture
 from sglang.srt.layers.attention.dsa_backend import DeepseekSparseAttnBackend
 from sglang.srt.layers.dp_attention import get_dp_tp_group
 from sglang.srt.layers.logprob_processor import compute_spec_logprobs
@@ -13,14 +14,17 @@ from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.model_executor.forward_mode import CaptureHiddenMode
-from sglang.srt.runtime_context import get_exec, get_schedule, get_spec
+from sglang.srt.model_executor.runner_utils.pool import (
+    get_or_create_global_graph_capture_stream,
+)
+from sglang.srt.runtime_context import get_exec, get_parallel, get_schedule, get_spec
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
 from sglang.srt.speculative.dflash_info import DFlashVerifyInput
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
 from sglang.srt.speculative.dflash_utils import (
-    apply_dflash_verify_logits_adjustments,
     commit_accept,
     compute_dflash_sampling_correct_drafts_and_bonus,
     is_dflash_sampling_verify_available,
@@ -28,6 +32,7 @@ from sglang.srt.speculative.dflash_utils import (
 from sglang.srt.speculative.dfly_utils import DFlyRequestState
 from sglang.srt.speculative.draft_worker_common import make_draft_input_v2
 from sglang.srt.speculative.spec_tp_sync import SpecTpSync, SpecTpSyncSite
+from sglang.srt.speculative.target_verify import adjust_verify_logits
 
 
 class DFlyWorkerV2(BaseSpecWorker):
@@ -45,18 +50,33 @@ class DFlyWorkerV2(BaseSpecWorker):
         self.model_runner = target_worker.model_runner
         self.device = self.model_runner.device
         self.dfly = self.model_runner.model.dfly
-        if self.dfly is None:
+        self.pp_group = get_parallel().pp_group
+        if self.dfly is None and self.pp_group.is_last_rank:
             raise ValueError("DFLY requires a target model with a bundled DFly draft")
-        self.dfly_config = self.dfly.dfly_config
+        self.dfly_config = self.dfly.dfly_config if self.dfly is not None else None
+        self._pp_proposal_graph = None
+        self._pp_verify_batch: Optional[ForwardBatch] = None
         self.block_size = int(get_spec().speculative_num_draft_tokens)
-        if self.block_size != self.dfly_config.block_size:
+        if (
+            self.dfly_config is not None
+            and self.block_size != self.dfly_config.block_size
+        ):
             raise ValueError("DFly draft and verify block sizes disagree")
         self._tp_sync = SpecTpSync(get_dp_tp_group())
         self._block_offsets = torch.arange(
             self.block_size, dtype=torch.int64, device=self.device
         )
         self._max_rows = self._max_verify_rows()
-        self._topk_capture = self._bind_topk_capture()
+        self._topk_capture = (
+            self._bind_topk_capture() if self.dfly is not None else None
+        )
+        hasher = self.model_runner.model.model.engram_hasher
+        if hasher is not None:
+            hasher.verify_recent = torch.zeros(
+                (self._max_rows, hasher.max_ngram_size - 1),
+                dtype=torch.int64,
+                device=self.device,
+            )
         self.state: Optional[DFlyRequestState] = None
 
     def _max_verify_rows(self) -> int:
@@ -77,13 +97,6 @@ class DFlyWorkerV2(BaseSpecWorker):
         for i, layer_id in enumerate(config.target_index_layers):
             indexer = model.layers[layer_id].self_attn.indexer
             indexer.dfly_topk_capture = capture[i]
-        hasher = model.engram_hasher
-        if hasher is not None:
-            hasher.verify_recent = torch.zeros(
-                (self._max_rows, hasher.max_ngram_size - 1),
-                dtype=torch.int64,
-                device=self.device,
-            )
         return capture
 
     def alloc_memory_pool(
@@ -97,6 +110,8 @@ class DFlyWorkerV2(BaseSpecWorker):
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
+        if self.dfly is None:
+            return
         config = self.dfly_config
         self.state = DFlyRequestState(
             pool_size=req_to_token_pool.req_to_token.shape[0],
@@ -134,15 +149,72 @@ class DFlyWorkerV2(BaseSpecWorker):
         pp_proxy_tensors=None,
     ) -> GenerationBatchResult:
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
-            return self._forward_prefill(batch, on_publish)
+            return self._forward_prefill(batch, on_publish, pp_proxy_tensors)
         if batch.forward_mode.is_idle():
             return self._forward_idle(on_publish)
-        return self._forward_decode(batch, on_publish)
+        return self._forward_decode(batch, on_publish, pp_proxy_tensors)
 
-    def _forward_prefill(self, batch: ScheduleBatch, on_publish):
-        result = self.target_worker.forward_batch_generation(
-            batch, capture_hidden_mode=CaptureHiddenMode.LAST
+    def init_cuda_graphs(self):
+        runner = self.model_runner.decode_cuda_graph_runner
+        if (
+            self.pp_group.world_size == 1
+            or runner is None
+            or 1 not in runner.capture_bs
+        ):
+            return
+        # Register the same communicator set as the target capture. Only the
+        # tail has draft layers; its proposal uses the target runner's input slots.
+        with graph_capture(
+            stream=get_or_create_global_graph_capture_stream()
+        ) as capture:
+            if self.dfly is None:
+                return
+            static, backend, _ = runner.capture_prepare(1)
+            with forward_context(ForwardContext(backend), forward_batch=static):
+                backend.init_forward_metadata_out_graph(static, in_capture=True)
+                # Keep the target and proposal allocations in separate graph pools.
+                graph = torch.cuda.CUDAGraph()
+                self._propose(static)
+                capture.stream.synchronize()
+                with torch.cuda.graph(graph, stream=capture.stream):
+                    self._propose(static)
+                self._pp_proposal_graph = graph, static, backend.forward_metadata
+
+    def _propose(self, batch):
+        positions = (
+            batch.mrope_positions[0]
+            if batch.mrope_positions is not None
+            else batch.positions
         )
+        self.dfly.draft_into_verify(batch.input_ids, positions, batch)
+
+    def prepare_pp_verify(self, batch: ScheduleBatch) -> None:
+        """Propose on the tail and send the candidate IDs before the head verifies."""
+        fwd = self._prepare_verify(batch, batch.spec_info)
+        if self.pp_group.is_last_rank:
+            runner = self.model_runner.decode_cuda_graph_runner
+            if self._pp_proposal_graph is not None and runner.can_run_graph(fwd):
+                graph, static, _ = self._pp_proposal_graph
+                runner.load_batch(fwd)
+                fwd.mark_forward_metadata_ready(replan_equivalent=True)
+                graph.replay()
+                fwd.input_ids.copy_(static.input_ids)
+            else:
+                backend = self.model_runner.attn_backend
+                with forward_context(ForwardContext(backend), forward_batch=fwd):
+                    backend.init_forward_metadata(fwd)
+                    self._propose(fwd)
+        self.pp_group.broadcast(fwd.input_ids, src=self.pp_group.world_size - 1)
+        self._pp_verify_batch = fwd
+
+    def _forward_prefill(self, batch: ScheduleBatch, on_publish, pp_proxy_tensors):
+        result = self.target_worker.forward_batch_generation(
+            batch,
+            capture_hidden_mode=CaptureHiddenMode.LAST,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
+        if not self.pp_group.is_last_rank:
+            return result
         result.new_seq_lens = batch.seq_lens
         if on_publish is not None:
             on_publish(result.new_seq_lens)
@@ -180,7 +252,7 @@ class DFlyWorkerV2(BaseSpecWorker):
             new_seq_lens=next_draft_input.new_seq_lens,
         )
 
-    def _forward_decode(self, batch: ScheduleBatch, on_publish):
+    def _forward_decode(self, batch: ScheduleBatch, on_publish, pp_proxy_tensors):
         draft_input = batch.spec_info
         if not isinstance(draft_input, DFlashDraftInputV2):
             raise RuntimeError("DFLY expects DFlashDraftInputV2 on the running batch")
@@ -188,10 +260,19 @@ class DFlyWorkerV2(BaseSpecWorker):
         bs = len(batch.seq_lens)
         width = self.block_size
         prefix_lens = batch.seq_lens
-        verify_forward_batch = self._prepare_verify(batch, draft_input)
+        if self.pp_group.world_size == 1:
+            verify_forward_batch = self._prepare_verify(batch, draft_input)
+        else:
+            verify_forward_batch, self._pp_verify_batch = self._pp_verify_batch, None
+            assert verify_forward_batch is not None
         target_out = self.target_worker.forward_batch_generation(
-            batch=None, forward_batch=verify_forward_batch, is_verify=True
+            batch=None,
+            forward_batch=verify_forward_batch,
+            is_verify=True,
+            pp_proxy_tensors=pp_proxy_tensors,
         )
+        if not self.pp_group.is_last_rank:
+            return target_out
         logits_output = target_out.logits_output
         candidates = self.dfly.candidates_out[: bs * width].view(bs, width)
         num_correct_drafts, bonus = self._accept(
@@ -228,13 +309,10 @@ class DFlyWorkerV2(BaseSpecWorker):
     ) -> ForwardBatch:
         bs = len(batch.seq_lens)
         width = self.block_size
-        block_ids = torch.full(
-            (bs, width),
-            self.dfly_config.mask_token_id,
-            dtype=torch.int64,
-            device=self.device,
-        )
-        block_ids[:, 0] = draft_input.bonus_tokens
+        block_ids = torch.empty((bs, width), dtype=torch.int64, device=self.device)
+        if self.dfly is not None:
+            block_ids[:, 1:].fill_(self.dfly_config.mask_token_id)
+            block_ids[:, 0] = draft_input.bonus_tokens
         positions = batch.seq_lens.to(torch.int64)[:, None] + self._block_offsets
         batch.out_cache_loc = assign_extend_cache_locs_func(
             req_pool_indices=batch.req_pool_indices,
@@ -268,16 +346,18 @@ class DFlyWorkerV2(BaseSpecWorker):
     def _accept(self, batch, draft_input, candidates, next_token_logits):
         sampling_info = batch.sampling_info
         if sampling_info is not None:
-            apply_dflash_verify_logits_adjustments(
-                next_token_logits=next_token_logits,
+            adjust_verify_logits(
+                next_token_logits,
                 sampling_info=sampling_info,
-                draft_token_num=self.block_size,
+                grammar_mask=None,
+                draft_tokens=candidates,
+                has_custom_logit_processor=sampling_info.has_custom_logit_processor,
             )
-        if (
-            sampling_info is not None
-            and not sampling_info.is_all_greedy
-            and is_dflash_sampling_verify_available()
-        ):
+        if sampling_info is not None and not sampling_info.is_all_greedy:
+            if not is_dflash_sampling_verify_available():
+                raise RuntimeError(
+                    "DFLY sampled verification requires a target-only sampling kernel."
+                )
             num_correct_drafts, bonus = (
                 compute_dflash_sampling_correct_drafts_and_bonus(
                     candidates=candidates,

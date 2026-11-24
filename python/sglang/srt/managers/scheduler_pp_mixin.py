@@ -206,9 +206,15 @@ class SchedulerPPMixin:
                 self.running_mbs[mb_id] = self.running_batch
                 cur_batch: Optional[ScheduleBatch] = self.mbs[mb_id]
                 self.cur_batch_for_debug = cur_batch
+                dfly_verify = (
+                    cur_batch is not None
+                    and self.spec_algorithm.is_dfly()
+                    and cur_batch.forward_mode.is_decode()
+                )
                 if cur_batch:
                     server_is_idle = False
-                    pp_proxy_tensors = self._pp_recv_proxy_tensors()
+                    if not dfly_verify:
+                        pp_proxy_tensors = self._pp_recv_proxy_tensors()
                 next_pp_outputs = None
                 next_batch_result = None
                 d2h_event = None
@@ -227,6 +233,16 @@ class SchedulerPPMixin:
                     )
                 self._pp_commit_proxy_send_work()
                 if cur_batch:
+                    if dfly_verify:
+                        # The tail can propose only after the preceding result has
+                        # traversed the ring. Relay token IDs before the head runs.
+                        with (
+                            self.forward_stream_ctx,
+                            self._forward_isolation(cur_batch, overlap=False),
+                        ):
+                            self._pp_wait_forward_dependencies()
+                            self.model_worker.prepare_pp_verify(cur_batch)
+                        pp_proxy_tensors = self._pp_recv_proxy_tensors()
                     result, self.launch_event = self._pp_launch_batch(
                         mb_id,
                         cur_batch,
@@ -988,6 +1004,7 @@ class SchedulerPPMixin:
         if (
             draft_input is not None
             and not batch.spec_algorithm.is_dspark()
+            and not batch.spec_algorithm.is_dfly()
             and draft_input.topk_p is not None
         ):
             tensor_dict["draft_topk_p"] = draft_input.topk_p.contiguous()
@@ -1251,7 +1268,26 @@ class SchedulerPPMixin:
                         merged, dtype=batch.seq_lens_cpu.dtype
                     )
                     batch.seq_lens_sum = int(sum(merged))
-            self._pp_spec_adopt_relayed_tree(batch, fwd_rids, pp_outputs)
+            if batch.spec_algorithm.is_dfly():
+                from sglang.srt.speculative.draft_worker_common import (
+                    make_draft_input_v2,
+                )
+
+                if live_rids != fwd_rids:
+                    raise RuntimeError("DFLY PP requires stable single-request batches")
+                batch.spec_info = make_draft_input_v2(
+                    bonus_tokens=pp_outputs["spec_bonus_tokens"],
+                    new_seq_lens=new_seq_lens,
+                )
+                if not self.pp_group.is_last_rank:
+                    hasher = self.tp_worker.model_runner.model.model.engram_hasher
+                    if hasher is not None:
+                        hasher.commit_verify(
+                            fwd_batch.req_pool_indices,
+                            pp_outputs["spec_accept_lens"].long() - 1,
+                        )
+            else:
+                self._pp_spec_adopt_relayed_tree(batch, fwd_rids, pp_outputs)
             output_result = GenerationBatchResult(
                 logits_output=logits_output,
                 pp_hidden_states_proxy_tensors=None,
@@ -1296,7 +1332,7 @@ class SchedulerPPMixin:
                 new_seq_lens=batch.seq_lens,
             )
             batch.spec_info = next_draft_input
-        elif batch.spec_algorithm.is_dflash():
+        elif batch.spec_algorithm.is_dflash() or batch.spec_algorithm.is_dfly():
             from sglang.srt.speculative.draft_worker_common import (
                 make_draft_input_v2,
             )
@@ -1314,7 +1350,7 @@ class SchedulerPPMixin:
             # no consumer reads, and storing it would seed the next verify
             # round with a token the model never emitted. The decode rounds
             # relay their own state, so the future_map stash is skipped.
-            if batch.contains_last_prefill_chunk:
+            if batch.contains_last_prefill_chunk and not batch.spec_algorithm.is_dfly():
                 from sglang.srt.speculative.pp_spec_relay import PPSpecRelayInput
 
                 fwd_batch = (

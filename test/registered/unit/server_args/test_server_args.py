@@ -3613,9 +3613,16 @@ class TestPipelineParallelCompat(CustomTestCase):
         with patch.object(
             validation_hook.envs.SGLANG_ENABLE_PP_SPEC, "get", return_value=True
         ):
-            check_pipeline_parallel_compat(cfg)
-            with self.assertRaisesRegex(AssertionError, "SGLANG_ENABLE_PP_SPEC"):
-                check_pipeline_parallel_compat(self._cfg(speculative_algorithm="EAGLE"))
+            for algorithm in ("EAGLE", "DFLY"):
+                with self.subTest(algorithm=algorithm):
+                    cfg.speculative_algorithm = algorithm
+                    check_pipeline_parallel_compat(cfg)
+                    with self.assertRaisesRegex(
+                        AssertionError, "SGLANG_ENABLE_PP_SPEC"
+                    ):
+                        check_pipeline_parallel_compat(
+                            self._cfg(speculative_algorithm=algorithm)
+                        )
 
     def test_nextn_resolves_to_eagle_and_is_allowed(self):
         """`--speculative-algorithm NEXTN` has collapsed to EAGLE by the time the

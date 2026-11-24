@@ -1469,6 +1469,10 @@ class HYV4FlashModel(nn.Module):
                 **get_embedding_tp_kwargs(),
             )
             if self.pp_group.is_first_rank
+            or (
+                get_spec().speculative_algorithm == "DFLY"
+                and self.pp_group.is_last_rank
+            )
             else PPMissingLayer()
         )
         self.alt_stream = None
@@ -1614,16 +1618,21 @@ class HYV4FlashForConditionalGeneration(nn.Module, DeepseekV2WeightLoaderMixin):
         else:
             self.lm_head = PPMissingLayer()
         self.dfly = None
-        if get_spec().speculative_algorithm == "DFLY":
-            if self.pp_group.world_size > 1:
-                raise ValueError("Hy4 DFly2 requires a single pipeline stage.")
+        if get_spec().speculative_algorithm == "DFLY" and self.pp_group.is_last_rank:
             from sglang.srt.models.hunyuan_v4_flash_dfly import HYV4FlashDFly
 
-            self.dfly = HYV4FlashDFly(
-                text_config,
-                parse_dfly_config(text_config, get_spec().speculative_num_draft_tokens),
-                quant_config,
+            draft_config = parse_dfly_config(
+                text_config, get_spec().speculative_num_draft_tokens
             )
+            if any(
+                layer < self.start_layer or layer >= self.end_layer
+                for layer in draft_config.target_kv_layers
+                + draft_config.target_index_layers
+            ):
+                raise ValueError(
+                    "All DFly shared layers must reside on the last pipeline stage."
+                )
+            self.dfly = HYV4FlashDFly(text_config, draft_config, quant_config)
             self.dfly.bind_target(self.model.embed_tokens, self.lm_head)
 
     @torch.no_grad()
@@ -1641,7 +1650,11 @@ class HYV4FlashForConditionalGeneration(nn.Module, DeepseekV2WeightLoaderMixin):
             positions = forward_batch.mrope_positions
             if _mrope_rows_are_equal(forward_batch.forward_mode):
                 positions = positions[0]
-        if self.dfly is not None and forward_batch.forward_mode.is_target_verify():
+        if (
+            self.dfly is not None
+            and self.pp_group.world_size == 1
+            and forward_batch.forward_mode.is_target_verify()
+        ):
             self.dfly.draft_into_verify(input_ids, positions, forward_batch)
         if self.is_mrope_enabled and input_embeds is None:
             mm_pad_ids = self._mm_pad_ids(forward_batch, input_ids.device)
@@ -1736,9 +1749,8 @@ class HYV4FlashForConditionalGeneration(nn.Module, DeepseekV2WeightLoaderMixin):
                         and not self.start_layer <= layer_id < self.end_layer
                     ):
                         continue
-                if (
-                    name.startswith("model.embed_tokens.")
-                    and not self.pp_group.is_first_rank
+                if name.startswith("model.embed_tokens.") and isinstance(
+                    model.embed_tokens, PPMissingLayer
                 ):
                     continue
                 if (

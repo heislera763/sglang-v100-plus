@@ -476,8 +476,16 @@ def _handle_dfly(server_args: ServerArgs) -> None:
     cfg = resolving_view(server_args)
     if not cfg.device.startswith("cuda"):
         raise ValueError("DFLY speculative decoding requires CUDA.")
-    if attn_dp_enabled_of(cfg) or cfg.pp_size != 1 or cfg.attn_cp_size != 1:
-        raise ValueError("DFLY does not support DP attention, PP or CP.")
+    if attn_dp_enabled_of(cfg) or cfg.attn_cp_size != 1:
+        raise ValueError("DFLY does not support DP attention or CP.")
+    if cfg.pp_size > 1 and (
+        cfg.pp_size != 2
+        or not envs.SGLANG_ENABLE_PP_SPEC.get()
+        or cfg.max_running_requests != 1
+    ):
+        raise ValueError(
+            "DFLY PP requires two stages, SGLANG_ENABLE_PP_SPEC=1 and one active request."
+        )
     if cfg.disaggregation_mode != "null":
         raise ValueError("DFLY does not support PD disaggregation.")
     if cfg.enable_lora:

@@ -1117,6 +1117,7 @@ class Scheduler(
             envs.SGLANG_ENABLE_PP_SPEC.get()
             and get_parallel().pp_size > 1
             and get_parallel().pp_rank != get_parallel().pp_size - 1
+            and not self.spec_algorithm.is_dfly()
         ):
             # PP+spec: the draft model (MTP layer) needs final hidden states and
             # the lm_head, both of which live on the last PP stage only.
@@ -5582,12 +5583,15 @@ class Scheduler(
                 # the rebuild below swaps it for this round's verify input, so
                 # hold on to it and put it back once the forward is done.
                 relay_input = batch.spec_info if is_verify_round else None
-                if is_verify_round:
+                if is_verify_round and not batch.spec_algorithm.is_dfly():
                     # PP+spec decode: every stage rebuilds the same verify
                     # input from relayed per-req state (draft lives on the
                     # last stage only).
                     self._pp_spec_rebuild_verify_input(batch)
-                if not self.pp_group.is_last_rank:
+                if (
+                    not self.pp_group.is_last_rank
+                    and not batch.spec_algorithm.is_dfly()
+                ):
                     # PP+spec: non-last stages run only their model chunk on
                     # the verify-shaped batch; sampling, accept and draft all
                     # live on the last stage. The plain tp_worker path already
